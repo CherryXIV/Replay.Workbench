@@ -1,0 +1,746 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Replay Workbench — A Realm Recorded .dat tool</title>
+<style>
+  /* ---- design tokens ----
+     Subject: a binary packet inspector for FFXIV duty recordings.
+     Direction: instrument panel. Dark slate, phosphor-cyan readouts, amber for the
+     recorder/local player, monospace data with one humanist sans for chrome. The
+     signature element is the pull TIMELINE — the recording rendered as a track of
+     selectable wipe segments, the way you'd scrub an oscilloscope capture. */
+  :root{
+    --bg:#0d1117;
+    --panel:#141b24;
+    --panel-2:#1b2531;
+    --line:#263344;
+    --ink:#d6e2f0;
+    --ink-dim:#7d8da0;
+    --ink-faint:#4d5a6b;
+    --phosphor:#39d4c8;       /* primary readout */
+    --phosphor-deep:#1c6f6a;
+    --amber:#f2b84c;          /* recorder / local player */
+    --violet:#8b7cf6;         /* waymarks */
+    --danger:#e8654f;
+    --radius:6px;
+    --mono:"JetBrains Mono",ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+    --sans:"Inter",-apple-system,system-ui,sans-serif;
+  }
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap');
+
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{
+    background:var(--bg);
+    color:var(--ink);
+    font-family:var(--sans);
+    font-size:14px;
+    line-height:1.5;
+    -webkit-font-smoothing:antialiased;
+    background-image:radial-gradient(circle at 50% -10%, rgba(57,212,200,.05), transparent 60%);
+  }
+  .wrap{max-width:1100px;margin:0 auto;padding:32px 24px 80px}
+
+  /* ---- header ---- */
+  header.app{display:flex;align-items:baseline;gap:16px;flex-wrap:wrap;margin-bottom:6px}
+  header.app h1{
+    font-family:var(--mono);font-weight:700;font-size:20px;letter-spacing:-.01em;
+    color:var(--ink);
+  }
+  header.app h1 .dot{color:var(--phosphor)}
+  header.app .sub{font-family:var(--mono);font-size:12px;color:var(--ink-dim)}
+  .tagline{color:var(--ink-dim);font-size:13px;margin-bottom:28px;max-width:60ch}
+
+  /* ---- drop zone ---- */
+  .drop{
+    display:block;
+    border:1px dashed var(--line);border-radius:var(--radius);
+    background:linear-gradient(180deg,var(--panel),transparent);
+    padding:48px 24px;text-align:center;cursor:pointer;
+    transition:border-color .15s,background .15s;
+  }
+  .drop:hover,.drop.over{border-color:var(--phosphor);background:rgba(57,212,200,.04)}
+  .drop .big{font-family:var(--mono);font-size:15px;color:var(--ink);margin-bottom:6px}
+  .drop .small{font-size:12px;color:var(--ink-dim)}
+  .drop .small b{color:var(--phosphor);font-weight:500}
+  input[type=file]{display:none}
+
+  /* ---- panels ---- */
+  .panel{
+    background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+    margin-top:20px;overflow:hidden;
+  }
+  .panel > .head{
+    display:flex;align-items:center;justify-content:space-between;
+    padding:12px 16px;border-bottom:1px solid var(--line);background:var(--panel-2);
+  }
+  .panel > .head h2{
+    font-family:var(--mono);font-size:12px;font-weight:500;letter-spacing:.08em;
+    text-transform:uppercase;color:var(--ink-dim);
+  }
+  .panel > .head .meta{font-family:var(--mono);font-size:12px;color:var(--phosphor)}
+  .panel > .body{padding:16px}
+
+  /* ---- header readout grid ---- */
+  .readout{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:1px;background:var(--line)}
+  .readout .cell{background:var(--panel);padding:12px 14px}
+  .readout .k{font-family:var(--mono);font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-faint);margin-bottom:4px}
+  .readout .v{font-family:var(--mono);font-size:14px;color:var(--ink);word-break:break-all}
+  .readout .v.cyan{color:var(--phosphor)}
+  .readout .v.amber{color:var(--amber)}
+
+  /* ---- timeline (signature) ---- */
+  .timeline-wrap{padding:20px 16px 8px}
+  .tl-axis{position:relative;height:64px;margin:0 4px}
+  .tl-track{position:absolute;top:26px;left:0;right:0;height:12px;background:var(--panel-2);border:1px solid var(--line);border-radius:3px;overflow:hidden}
+  .tl-seg{position:absolute;top:0;height:100%;cursor:pointer;border-right:1px solid var(--bg);transition:filter .12s}
+  .tl-seg:hover{filter:brightness(1.4)}
+  .tl-seg.sel{outline:2px solid var(--phosphor);outline-offset:0;z-index:3}
+  .tl-tick{position:absolute;top:42px;font-family:var(--mono);font-size:9px;color:var(--ink-faint);transform:translateX(-50%)}
+  .tl-flag{position:absolute;top:6px;width:1px;background:var(--ink-faint);height:18px}
+  .tl-flag.wm{background:var(--violet);height:20px}
+  .tl-legend{display:flex;gap:18px;flex-wrap:wrap;margin-top:14px;font-family:var(--mono);font-size:11px;color:var(--ink-dim)}
+  .tl-legend .sw{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:6px;vertical-align:-1px}
+
+  /* ---- pull list ---- */
+  table.pulls{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:13px}
+  table.pulls th{
+    text-align:left;font-weight:500;font-size:10px;letter-spacing:.08em;text-transform:uppercase;
+    color:var(--ink-faint);padding:8px 12px;border-bottom:1px solid var(--line);
+  }
+  table.pulls td{padding:9px 12px;border-bottom:1px solid var(--panel-2);color:var(--ink)}
+  table.pulls tr{cursor:pointer}
+  table.pulls tr:hover td{background:var(--panel-2)}
+  table.pulls tr.sel td{background:rgba(57,212,200,.08);color:var(--ink)}
+  table.pulls tr.sel td:first-child{box-shadow:inset 3px 0 0 var(--phosphor)}
+  table.pulls .num{color:var(--phosphor)}
+  table.pulls .dim{color:var(--ink-dim)}
+
+  /* ---- players ---- */
+  .players{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:10px}
+  .pl{display:flex;align-items:center;gap:10px;background:var(--panel-2);border:1px solid var(--line);border-radius:var(--radius);padding:8px 10px}
+  .pl .idx{font-family:var(--mono);font-size:11px;color:var(--ink-faint);width:18px;text-align:right}
+  .pl .job{font-family:var(--mono);font-size:10px;color:var(--ink-dim);width:34px;text-transform:uppercase}
+  .pl input{
+    flex:1;background:var(--bg);border:1px solid var(--line);border-radius:4px;
+    color:var(--ink);font-family:var(--mono);font-size:13px;padding:6px 8px;min-width:0;
+  }
+  .pl input:focus{outline:none;border-color:var(--phosphor)}
+  .pl.rec{border-color:var(--amber)}
+  .pl.rec .idx{color:var(--amber)}
+  .pl .reclabel{font-family:var(--mono);font-size:9px;color:var(--amber);letter-spacing:.05em}
+
+  /* ---- controls ---- */
+  .controls{display:flex;align-items:center;gap:20px;flex-wrap:wrap;margin-top:18px}
+  .check{display:flex;align-items:center;gap:9px;cursor:pointer;user-select:none}
+  .check input{position:absolute;opacity:0;width:0;height:0}
+  .check .box{width:18px;height:18px;border:1px solid var(--line);border-radius:4px;background:var(--panel-2);display:grid;place-items:center;transition:all .12s}
+  .check input:checked + .box{background:var(--violet);border-color:var(--violet)}
+  .check input:checked + .box::after{content:"";width:5px;height:9px;border:solid var(--bg);border-width:0 2px 2px 0;transform:rotate(45deg) translateY(-1px)}
+  .check input:focus-visible + .box{outline:2px solid var(--phosphor);outline-offset:2px}
+  .check .lbl{font-size:13px;color:var(--ink)}
+  .check .lbl small{display:block;color:var(--ink-dim);font-size:11px}
+  .check.disabled{opacity:.45;cursor:not-allowed}
+
+  .spacer{flex:1}
+  button.act{
+    font-family:var(--mono);font-size:13px;font-weight:500;
+    background:var(--phosphor);color:#05201e;border:none;border-radius:var(--radius);
+    padding:11px 20px;cursor:pointer;transition:filter .12s,transform .05s;
+  }
+  button.act:hover{filter:brightness(1.1)}
+  button.act:active{transform:translateY(1px)}
+  button.act:disabled{background:var(--panel-2);color:var(--ink-faint);cursor:not-allowed}
+  button.ghost{
+    font-family:var(--mono);font-size:13px;background:transparent;color:var(--ink-dim);
+    border:1px solid var(--line);border-radius:var(--radius);padding:11px 16px;cursor:pointer;
+  }
+  button.ghost:hover{color:var(--ink);border-color:var(--ink-faint)}
+
+  .hint{font-family:var(--mono);font-size:11px;color:var(--ink-dim);margin-top:10px}
+  .hidden{display:none !important}
+
+  /* ---- toast ---- */
+  #toast{
+    position:fixed;left:50%;bottom:28px;transform:translateX(-50%) translateY(20px);
+    background:var(--panel-2);border:1px solid var(--phosphor);color:var(--ink);
+    font-family:var(--mono);font-size:13px;padding:12px 18px;border-radius:var(--radius);
+    opacity:0;pointer-events:none;transition:all .2s;z-index:50;max-width:90vw;
+  }
+  #toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+  #toast.err{border-color:var(--danger)}
+
+  footer{margin-top:40px;font-family:var(--mono);font-size:11px;color:var(--ink-faint);text-align:center;line-height:1.8}
+  footer b{color:var(--ink-dim);font-weight:500}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="app">
+    <h1>Replay<span class="dot">.</span>Workbench</h1>
+    <span class="sub">FFXIV duty replay (.dat) inspector &amp; splitter</span>
+  </header>
+  <p class="tagline">Open an "A Realm Recorded"  recording to inspect its header, rename players,
+    and export a single pull as its own small, loadable file. Everything runs in your browser.
+    Your file never leaves your machine.</p>
+
+  <!-- drop zone -->
+  <label class="drop" id="drop" for="file">
+    <div class="big">Drop a <b style="color:var(--phosphor)">.dat</b> here, or click to browse</div>
+    <input type="file" id="file" accept=".dat">
+  </label>
+
+  <!-- header readout -->
+  <section class="panel hidden" id="p-header">
+    <div class="head"><h2>Recording header</h2><span class="meta" id="h-file">—</span></div>
+    <div class="readout" id="readout"></div>
+  </section>
+
+  <!-- timeline -->
+  <section class="panel hidden" id="p-timeline">
+    <div class="head"><h2>Pull timeline</h2><span class="meta" id="t-count">—</span></div>
+    <div class="timeline-wrap">
+      <div class="tl-axis" id="tlaxis"></div>
+      <div class="tl-legend">
+        <span><span class="sw" style="background:var(--phosphor)"></span>selected pull</span>
+        <span><span class="sw" style="background:var(--phosphor-deep)"></span>pull (wipe segment)</span>
+        <span><span class="sw" style="background:var(--violet)"></span>waymark placement</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- pull table -->
+  <section class="panel hidden" id="p-pulls">
+    <div class="head"><h2>Pulls</h2><span class="meta" id="pull-sel">none selected</span></div>
+    <div class="body" style="padding:0">
+      <table class="pulls">
+        <thead><tr><th>#</th><th>type</th><th>starts</th><th>length</th><th>respawn batch</th></tr></thead>
+        <tbody id="pulltbody"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- players -->
+  <section class="panel hidden" id="p-players">
+    <div class="head"><h2>Players</h2>
+      <span style="display:flex;align-items:center;gap:12px">
+        <button class="ghost" id="btn-anon" style="padding:5px 12px;font-size:12px" title="Replace every name with Player 1, Player 2, …">Anonymize all names</button>
+        <span class="meta" id="pl-count">—</span>
+      </span></div>
+    <div class="body">
+      <div class="players" id="players"></div>
+      <div class="hint">Edit a name and it's rewritten everywhere it appears. Names are limited to 31 bytes. The <span style="color:var(--amber)">amber</span> player is the recorder.</div>
+    </div>
+  </section>
+
+  <!-- controls -->
+  <section class="panel hidden" id="p-controls">
+    <div class="head"><h2>Export</h2><span class="meta">single pull → .dat</span></div>
+    <div class="body">
+      <div class="controls">
+        <label class="check" id="wm-check">
+          <input type="checkbox" id="wm" checked>
+          <span class="box"></span>
+          <span class="lbl">Re-apply waymarks
+            <small id="wm-sub">carry the latest placement into the pull</small></span>
+        </label>
+        <label class="check" id="names-check">
+          <input type="checkbox" id="applynames" checked>
+          <span class="box"></span>
+          <span class="lbl">Apply name edits
+            <small>use the names above in the exported file</small></span>
+        </label>
+        <div class="spacer"></div>
+        <button class="ghost" id="btn-names" title="Save the whole recording with edited names, nothing split">Export renamed full file</button>
+        <button class="act" id="btn-split" disabled>Export selected pull</button>
+      </div>
+      <div class="hint" id="export-hint">Select a pull from the timeline or table to enable export.</div>
+    </div>
+  </section>
+
+  <footer>
+    <div><b>replay.workbench</b> · client-side only · no upload</div>
+    <div>setup + wipe-respawn + waymark reconstruction · header &amp; player editing</div>
+  </footer>
+</div>
+
+<div id="toast"></div>
+
+<script>
+"use strict";
+/* =====================================================================
+   FFXIVReplay .dat — format constants (from the FFXIVReplay struct)
+   Header        : 0x68 bytes
+   ChapterArray  : 0x4 + 0xC*64 bytes
+   Chapter       : int type; uint offset; uint ms      (0xC bytes)
+   data starts at: 0x68 + 0x304 = 0x36C
+   DataSegment   : u16 opcode; u16 dataLength; u32 ms; u32 objectID (12) + payload
+   ===================================================================== */
+const HEADER_SIZE = 0x68;
+const CHAPTER_ENTRY = 0xC;
+const MAX_CHAPTERS = 64;
+const CHAPTER_ARRAY = 0x4 + CHAPTER_ENTRY * MAX_CHAPTERS; // 0x304
+const DATA_START = HEADER_SIZE + CHAPTER_ARRAY;           // 0x36C
+const SEG_HEADER = 12;
+
+const OFF_REPLAY_LEN = 0x48;
+const OFF_TOTAL_MS = 0x18;
+const OFF_DISPLAYED_MS = 0x1C;
+const OFF_TIMESTAMP = 0x14;
+const OFF_VERSION = 0x0C;
+const OFF_OSTYPE = 0x0E;
+const OFF_BUILD = 0x10;
+const OFF_CONTENTID = 0x20;
+const OFF_INFO = 0x28;
+const OFF_LOCALCID = 0x30;
+const OFF_JOBS = 0x38;
+const OFF_PLAYERINDEX = 0x40;
+
+const PULL_START_TYPES = [2,5];
+const DIRECTOR_OPCODE = 0x03E4;
+const SPAWN_OPCODE = 0x0113;
+const WAYMARK_OPCODE = 0x0255;
+const WAYMARK_PRESET_OPCODE = 0x02AB;
+const BATCH_LOOKBACK = 8000;
+const BATCH_MS_WINDOW = 2000;
+const MIN_BATCH_SPAWNS = 20;
+
+const MAGIC = [70,70,88,73,86,82,69,80,76,65,89,0]; // "FFXIVREPLAY\0"
+const CHAPTER_TYPE_NAMES = {1:"Countdown",2:"Start/Restart",3:"Countdown(3)",4:"Event Cutscene",5:"Barrier Down"};
+/* A small, partial Job-ID → abbreviation map for display only. */
+const JOB_ABBR = {0:"—",1:"GLA",2:"PGL",3:"MRD",4:"LNC",5:"ARC",6:"CNJ",7:"THM",
+  19:"PLD",20:"MNK",21:"WAR",22:"DRG",23:"BRD",24:"WHM",25:"BLM",26:"ACN",27:"SMN",28:"SCH",
+  29:"ROG",30:"NIN",31:"MCH",32:"DRK",33:"AST",34:"SAM",35:"RDM",36:"BLU",37:"GNB",38:"DNC",
+  39:"RPR",40:"SGE",41:"VPR",42:"PCT"};
+
+/* ---- app state ---- */
+let raw = null;          // Uint8Array of the loaded file
+let dv = null;           // DataView over raw
+let fileName = "";
+let segs = [];           // {offset,opcode,dataLength,ms,oid}
+let chapters = [];       // {type,offset,ms}
+let pulls = [];          // pull chapters with computed ranges
+let players = [];        // {name, offsets:[...], jobIndex}
+let selectedPull = -1;
+
+/* ---- byte helpers (little-endian, like the game) ---- */
+const u16=(o)=>dv.getUint16(o,true);
+const u32=(o)=>dv.getUint32(o,true);
+const i32=(o)=>dv.getInt32(o,true);
+
+function decodeName(off){ // null-terminated within 32-byte field
+  let end=off; while(end<off+32 && raw[end]!==0) end++;
+  return new TextDecoder().decode(raw.subarray(off,end));
+}
+
+/* =====================================================================
+   Parse
+   ===================================================================== */
+function parse(buffer){
+  raw = new Uint8Array(buffer);
+  dv = new DataView(raw.buffer);
+  for(let i=0;i<MAGIC.length;i++) if(raw[i]!==MAGIC[i]) throw new Error("Not an FFXIVREPLAY .dat (bad header).");
+
+  const replayLength = i32(OFF_REPLAY_LEN);
+
+  // walk segments
+  segs=[]; let off=0;
+  while(off < replayLength){
+    const b = DATA_START+off;
+    const opcode=u16(b), dataLength=u16(b+2), ms=u32(b+4), oid=u32(b+8);
+    segs.push({offset:off,opcode,dataLength,ms,oid,total:SEG_HEADER+dataLength});
+    off += SEG_HEADER+dataLength;
+  }
+
+  // chapters
+  chapters=[]; const clen=i32(HEADER_SIZE);
+  for(let i=0;i<clen;i++){
+    const e=HEADER_SIZE+4+i*CHAPTER_ENTRY;
+    chapters.push({type:i32(e),offset:u32(e+4),ms:u32(e+8)});
+  }
+
+  // pull chapters with ranges
+  const o2i=new Map(segs.map((s,i)=>[s.offset,i]));
+  const pullChapters=chapters.filter(c=>PULL_START_TYPES.includes(c.type));
+  pulls = pullChapters.map((pc,n)=>{
+    const startIndex=o2i.get(pc.offset);
+    const endIndex = (n<pullChapters.length-1) ? o2i.get(pullChapters[n+1].offset) : segs.length;
+    const lastMs = endIndex>startIndex ? segs[endIndex-1].ms : pc.ms;
+    const respawnStart=findRespawnBatchStart(startIndex);
+    const batchCount=countSpawns(respawnStart,startIndex);
+    return {chapter:pc,n:n+1,startIndex,endIndex,lengthMs:Math.max(0,lastMs-pc.ms),respawnStart,batchCount};
+  });
+
+  // players: scan 32-byte name fields
+  players = findPlayers();
+
+  return {replayLength};
+}
+
+function findRespawnBatchStart(pullIndex){
+  const lo=Math.max(0,pullIndex-BATCH_LOOKBACK);
+  const spawns=[];
+  for(let i=lo;i<pullIndex;i++) if(segs[i].opcode===SPAWN_OPCODE) spawns.push(i);
+  if(spawns.length===0) return pullIndex;
+  const clusters=[]; let cur=[spawns[0]];
+  for(let k=1;k<spawns.length;k++){
+    const i=spawns[k];
+    if(segs[i].ms-segs[cur[cur.length-1]].ms<=BATCH_MS_WINDOW) cur.push(i);
+    else{clusters.push(cur);cur=[i];}
+  }
+  clusters.push(cur);
+  let chosen=null;
+  for(let c of clusters) if(c.length>=MIN_BATCH_SPAWNS) chosen=c;
+  if(!chosen) chosen=clusters[clusters.length-1];
+  return Math.min(...chosen);
+}
+function countSpawns(a,b){let n=0;for(let i=a;i<b;i++)if(segs[i].opcode===SPAWN_OPCODE)n++;return n;}
+
+function findPlayers(){
+  // a 32-byte field: "First Last\0" + null padding, two cap-initial parts
+  const found=new Map(); const order=[];
+  const isUpper=(b)=>b>=65&&b<=90;
+  const isNameChar=(b)=>(b>=65&&b<=90)||(b>=97&&b<=122)||b===32||b===39||b===45;
+  for(let i=0;i+32<=DATA_START+segDataBytes();i++){
+    if(!isUpper(raw[i])) continue;
+    let len=0; while(len<32 && isNameChar(raw[i+len])) len++;
+    if(len===0||len>31) continue;
+    let padded=true; for(let j=len;j<32;j++){if(raw[i+j]!==0){padded=false;break;}}
+    if(!padded) continue;
+    const s=new TextDecoder().decode(raw.subarray(i,i+len));
+    if(!looksLikeName(s)) continue;
+    if(!found.has(s)){found.set(s,[]);order.push(s);}
+    found.get(s).push(i);
+  }
+  // map to job via header jobs[] using player order in header isn't reliable; show job by index
+  return order.map((name,idx)=>({name,offsets:found.get(name),jobIndex:idx}));
+}
+function segDataBytes(){return i32(OFF_REPLAY_LEN);}
+function looksLikeName(s){
+  const parts=s.split(" ");
+  if(parts.length!==2) return false;
+  for(const p of parts){
+    if(p.length<2||p.length>15) return false;
+    if(!(p[0]>="A"&&p[0]<="Z")) return false;
+    for(const c of p){const ok=/[A-Za-z'\-]/.test(c); if(!ok) return false;}
+  }
+  return true;
+}
+
+/* =====================================================================
+   Render
+   ===================================================================== */
+function fmtClock(ms){
+  let s=Math.floor(ms/1000), msec=ms%1000;
+  const h=Math.floor(s/3600); s%=3600;
+  const m=Math.floor(s/60); s%=60;
+  const pad=(x,n=2)=>String(x).padStart(n,"0");
+  return h>0?`${h}:${pad(m)}:${pad(s)}`:`${pad(m)}:${pad(s)}.${pad(msec,3)}`;
+}
+function fmtBytes(n){return n<1024?`${n} B`:n<1048576?`${(n/1024).toFixed(0)} KB`:`${(n/1048576).toFixed(1)} MB`;}
+
+function renderHeader(){
+  const ts=u32(OFF_TIMESTAMP);
+  const info=raw[OFF_INFO];
+  const flags=[]; if(info&1)flags.push("up-to-date"); if(info&2)flags.push("locked"); if(info&4)flags.push("completed");
+  const localCID = dv.getBigUint64(OFF_LOCALCID,true);
+  const jobs=[]; for(let i=0;i<8;i++) jobs.push(raw[OFF_JOBS+i]);
+  const playerIndex=raw[OFF_PLAYERINDEX];
+  const cells=[
+    ["format version", u16(OFF_VERSION), ""],
+    ["os", u16(OFF_OSTYPE)===3?"Windows":u16(OFF_OSTYPE)===5?"Mac":u16(OFF_OSTYPE), ""],
+    ["game build", i32(OFF_BUILD), ""],
+    ["recorded", new Date(ts*1000).toISOString().replace("T"," ").replace(/\..+/,"")+" UTC", "cyan"],
+    ["content id", u16(OFF_CONTENTID), ""],
+    ["total length", fmtClock(u32(OFF_TOTAL_MS)), "cyan"],
+    ["info flags", flags.join(", ")||"none", ""],
+    ["recorder", `player ${playerIndex+1}`, "amber"],
+    ["jobs", jobs.map(j=>JOB_ABBR[j]||j).join(" "), ""],
+    ["local CID", "0x"+localCID.toString(16), ""],
+    ["replay length", fmtBytes(i32(OFF_REPLAY_LEN)), ""],
+    ["segments", segs.length.toLocaleString(), ""],
+  ];
+  document.getElementById("readout").innerHTML = cells.map(([k,v,c])=>
+    `<div class="cell"><div class="k">${k}</div><div class="v ${c}">${v}</div></div>`).join("");
+  document.getElementById("h-file").textContent = fileName;
+}
+
+function renderTimeline(){
+  const totalMs=u32(OFF_TOTAL_MS)||1;
+  const axis=document.getElementById("tlaxis");
+  axis.innerHTML="";
+  const track=document.createElement("div"); track.className="tl-track"; axis.appendChild(track);
+
+  // segments between consecutive pull starts
+  pulls.forEach((p,idx)=>{
+    const startMs=p.chapter.ms;
+    const endMs = idx<pulls.length-1 ? pulls[idx+1].chapter.ms : totalMs;
+    const left=(startMs/totalMs)*100, width=Math.max(0.4,((endMs-startMs)/totalMs)*100);
+    const seg=document.createElement("div");
+    seg.className="tl-seg"+(idx===selectedPull?" sel":"");
+    seg.style.left=left+"%"; seg.style.width=width+"%";
+    seg.style.background = idx===selectedPull?"var(--phosphor)":"var(--phosphor-deep)";
+    seg.title=`Pull ${p.n} — ${fmtClock(startMs)}`;
+    seg.onclick=()=>selectPull(idx);
+    track.appendChild(seg);
+    // tick every few pulls
+    if(idx%3===0){
+      const t=document.createElement("div"); t.className="tl-tick"; t.style.left=left+"%";
+      t.textContent=fmtClock(startMs).replace(/\.\d+$/,""); axis.appendChild(t);
+    }
+  });
+
+  // waymark placement flags
+  segs.forEach(s=>{
+    if(s.opcode===WAYMARK_PRESET_OPCODE || s.opcode===WAYMARK_OPCODE){
+      // skip empty presets
+      if(s.opcode===WAYMARK_PRESET_OPCODE && isEmptyPreset(s)) return;
+      const f=document.createElement("div"); f.className="tl-flag wm";
+      f.style.left=(s.ms/totalMs)*100+"%"; f.title="Waymark @ "+fmtClock(s.ms);
+      axis.appendChild(f);
+    }
+  });
+
+  document.getElementById("t-count").textContent=`${pulls.length} pulls · ${fmtClock(totalMs)}`;
+}
+
+function renderPullTable(){
+  const tb=document.getElementById("pulltbody"); tb.innerHTML="";
+  pulls.forEach((p,idx)=>{
+    const tr=document.createElement("tr");
+    if(idx===selectedPull) tr.className="sel";
+    tr.innerHTML=`<td class="num">${p.n}</td>
+      <td>${CHAPTER_TYPE_NAMES[p.chapter.type]||p.chapter.type}</td>
+      <td>${fmtClock(p.chapter.ms)}</td>
+      <td class="dim">${fmtClock(p.lengthMs)}</td>
+      <td class="dim">${p.batchCount} spawns</td>`;
+    tr.onclick=()=>selectPull(idx);
+    tb.appendChild(tr);
+  });
+}
+
+function renderPlayers(){
+  const wrap=document.getElementById("players"); wrap.innerHTML="";
+  const recorderIdx=raw[OFF_PLAYERINDEX];
+  players.forEach((p,idx)=>{
+    const isRec = idx===recorderIdx;
+    const div=document.createElement("div");
+    div.className="pl"+(isRec?" rec":"");
+    div.innerHTML=`<span class="idx">${idx+1}</span>
+      <input type="text" value="${escapeHtml(p.name)}" maxlength="31" data-idx="${idx}">
+      ${isRec?'<span class="reclabel">REC</span>':''}`;
+    wrap.appendChild(div);
+  });
+  document.getElementById("pl-count").textContent=`${players.length} found`;
+  wrap.querySelectorAll("input").forEach(inp=>{
+    inp.addEventListener("input",e=>{
+      players[+e.target.dataset.idx].newName=e.target.value;
+    });
+  });
+}
+function escapeHtml(s){return s.replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));}
+
+/* =====================================================================
+   Select
+   ===================================================================== */
+function selectPull(idx){
+  selectedPull=idx;
+  renderTimeline(); renderPullTable();
+  const p=pulls[idx];
+  document.getElementById("pull-sel").textContent=`pull ${p.n} · ${CHAPTER_TYPE_NAMES[p.chapter.type]} · ${fmtClock(p.chapter.ms)}`;
+  document.getElementById("btn-split").disabled=false;
+  document.getElementById("export-hint").textContent=`Pull ${p.n} ready to export (opens at ${fmtClock(p.chapter.ms)}, ${p.batchCount} actors respawned).`;
+}
+
+/* =====================================================================
+   Apply name edits (size-preserving, every occurrence)
+   ===================================================================== */
+function applyNameEdits(target){
+  const enc=new TextEncoder();
+  for(const p of players){
+    if(p.newName===undefined || p.newName===p.name) continue;
+    const nb=enc.encode(p.newName);
+    if(nb.length>31){ throw new Error(`"${p.newName}" is ${nb.length} bytes (max 31).`); }
+    for(const off of p.offsets){
+      for(let k=0;k<32;k++) target[off+k]=0;        // clear the 32-byte field
+      target.set(nb,off);                            // write new name
+    }
+  }
+}
+
+/* =====================================================================
+   Split a single pull  (port of split_pulls_small.py)
+   ===================================================================== */
+function isEmptyPreset(s){
+  const base=DATA_START+s.offset+SEG_HEADER;
+  for(let i=0;i<96;i++) if(raw[base+i]!==0) return false;
+  return true;
+}
+function segRaw(srcBytes,s){ const b=DATA_START+s.offset; return srcBytes.subarray(b,b+s.total); }
+function rebasedSeg(srcBytes,s,newMs){
+  const out=srcBytes.slice(DATA_START+s.offset, DATA_START+s.offset+s.total);
+  const ms=Math.max(0,newMs);
+  new DataView(out.buffer).setUint32(4,ms>>>0,true);
+  return out;
+}
+
+function buildPull(idx,opts){
+  // source bytes (optionally with name edits applied)
+  let src=raw;
+  if(opts.applyNames){
+    src=raw.slice();             // copy
+    applyNameEdits(src);
+  }
+
+  const p=pulls[idx];
+  const pullIndex=p.startIndex, endIndex=p.endIndex;
+  const pullStartMs=p.chapter.ms;
+
+  // setup block: 0 .. director packet inclusive
+  let directorIndex=segs.findIndex(s=>s.opcode===DIRECTOR_OPCODE);
+  const setupEnd = directorIndex>=0 ? directorIndex+1 : pulls[0].startIndex;
+
+  let carryStart=p.respawnStart;
+  if(carryStart<setupEnd) carryStart=pullIndex;
+
+  const parts=[];
+
+  // 1) setup, original ms
+  for(let i=0;i<setupEnd;i++) parts.push(segRaw(src,segs[i]));
+
+  // 2+3) [respawn .. next pull], rebased; inject waymarks at the pull start
+  let chapterNewOffset=-1, written=byteLen(parts);
+  for(let i=carryStart;i<endIndex;i++){
+    if(i===pullIndex){
+      // chapter points at the pull start (the waymark packets are emitted here at ms=0,
+      // right before the pull's own first packet — same as the validated Python splitter)
+      chapterNewOffset=byteLen(parts);
+      if(opts.waymarks) injectWaymarks(src,parts,pullIndex);
+    }
+    parts.push(rebasedSeg(src,segs[i],segs[i].ms-pullStartMs));
+  }
+  if(chapterNewOffset<0) chapterNewOffset=byteLen(parts);
+
+  const body=concat(parts);
+  const lastMs = endIndex>carryStart ? Math.max(0,segs[endIndex-1].ms-pullStartMs):0;
+
+  // header
+  const header=src.slice(0,HEADER_SIZE);
+  const hv=new DataView(header.buffer);
+  hv.setInt32(OFF_REPLAY_LEN,body.length,true);
+  hv.setUint32(OFF_TOTAL_MS,lastMs>>>0,true);
+  hv.setUint32(OFF_DISPLAYED_MS,lastMs>>>0,true);
+
+  // chapter array: single chapter at the pull start
+  const ca=new Uint8Array(CHAPTER_ARRAY);
+  const cav=new DataView(ca.buffer);
+  cav.setInt32(0,1,true);
+  cav.setInt32(4,p.chapter.type,true);
+  cav.setUint32(8,chapterNewOffset>>>0,true);
+  cav.setUint32(12,0,true);
+
+  return concat([header,ca,body]);
+}
+function injectWaymarks(src,parts,pullIndex){
+  const latestIndividual=new Map(); let latestPreset=null;
+  for(let j=0;j<pullIndex;j++){
+    const sj=segs[j];
+    if(sj.opcode===WAYMARK_OPCODE){ latestIndividual.set(raw[DATA_START+sj.offset+SEG_HEADER],sj); }
+    else if(sj.opcode===WAYMARK_PRESET_OPCODE && !isEmptyPreset(sj)){ latestPreset=sj; }
+  }
+  if(latestPreset){ parts.push(rebasedSeg(src,latestPreset,0)); }
+  else { [...latestIndividual.keys()].sort((a,b)=>a-b).forEach(k=>parts.push(rebasedSeg(src,latestIndividual.get(k),0))); }
+}
+function byteLen(parts){let n=0;for(const p of parts)n+=p.length;return n;}
+function concat(parts){const n=byteLen(parts);const out=new Uint8Array(n);let o=0;for(const p of parts){out.set(p,o);o+=p.length;}return out;}
+
+/* =====================================================================
+   Save / full-file rename
+   ===================================================================== */
+function buildRenamedFull(){
+  const out=raw.slice();
+  applyNameEdits(out);
+  return out;
+}
+function download(bytes,name){
+  const blob=new Blob([bytes],{type:"application/octet-stream"});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement("a"); a.href=url; a.download=name; a.click();
+  setTimeout(()=>URL.revokeObjectURL(url),1000);
+}
+
+/* =====================================================================
+   Wire up
+   ===================================================================== */
+const drop=document.getElementById("drop");
+const fileInput=document.getElementById("file");
+["dragenter","dragover"].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.add("over");}));
+["dragleave","drop"].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.remove("over");}));
+drop.addEventListener("drop",e=>{const f=e.dataTransfer.files[0]; if(f) loadFile(f);});
+fileInput.addEventListener("change",e=>{const f=e.target.files[0]; if(f) loadFile(f);});
+
+function loadFile(f){
+  fileName=f.name;
+  const r=new FileReader();
+  r.onload=()=>{
+    try{
+      parse(r.result);
+      // waymark availability for the checkbox
+      const hasWaymark = segs.some(s=>(s.opcode===WAYMARK_PRESET_OPCODE&&!isEmptyPreset(s))||s.opcode===WAYMARK_OPCODE);
+      const wmCheck=document.getElementById("wm-check"), wm=document.getElementById("wm"), wmSub=document.getElementById("wm-sub");
+      if(hasWaymark){ wmCheck.classList.remove("disabled"); wm.disabled=false; wmSub.textContent="carry the latest placement into the pull"; }
+      else{ wmCheck.classList.add("disabled"); wm.checked=false; wm.disabled=true; wmSub.textContent="none captured in this recording"; }
+
+      renderHeader(); renderTimeline(); renderPullTable(); renderPlayers();
+      ["p-header","p-timeline","p-pulls","p-players","p-controls"].forEach(id=>document.getElementById(id).classList.remove("hidden"));
+      selectedPull=-1;
+      document.getElementById("btn-split").disabled=true;
+      document.getElementById("pull-sel").textContent="none selected";
+      document.getElementById("export-hint").textContent="Select a pull from the timeline or table to enable export.";
+      toast(`Loaded ${pulls.length} pulls, ${players.length} players.`);
+    }catch(err){ toast(err.message,true); }
+  };
+  r.readAsArrayBuffer(f);
+}
+
+document.getElementById("btn-split").addEventListener("click",()=>{
+  if(selectedPull<0) return;
+  try{
+    const opts={
+      waymarks: document.getElementById("wm").checked,
+      applyNames: document.getElementById("applynames").checked,
+    };
+    const bytes=buildPull(selectedPull,opts);
+    const base=fileName.replace(/\.dat$/i,"");
+    download(bytes,`pull${pulls[selectedPull].n}_${base}.dat`);
+    toast(`Exported pull ${pulls[selectedPull].n} (${fmtBytes(bytes.length)}).`);
+  }catch(err){ toast(err.message,true); }
+});
+
+document.getElementById("btn-anon").addEventListener("click",()=>{
+  players.forEach((p,idx)=>{ p.newName=`Player ${idx+1}`; });
+  document.querySelectorAll("#players input").forEach(inp=>{
+    inp.value=players[+inp.dataset.idx].newName;
+  });
+  toast(`Anonymized ${players.length} names — export to save.`);
+});
+
+document.getElementById("btn-names").addEventListener("click",()=>{
+  try{
+    const bytes=buildRenamedFull();
+    download(bytes,`RENAMED_${fileName}`);
+    toast(`Exported full recording with edited names (${fmtBytes(bytes.length)}).`);
+  }catch(err){ toast(err.message,true); }
+});
+
+let toastTimer=null;
+function toast(msg,isErr=false){
+  const t=document.getElementById("toast");
+  t.textContent=msg; t.className="show"+(isErr?" err":"");
+  clearTimeout(toastTimer); toastTimer=setTimeout(()=>t.className=isErr?"err":"",2600);
+}
+</script>
+</body>
+</html>
