@@ -664,11 +664,28 @@ function buildRenamedFull(){
   applyNameEdits(out);
   return out;
 }
-function download(bytes,name){
+async function download(bytes,name){
   const blob=new Blob([bytes],{type:"application/octet-stream"});
+  // Prefer the File System Access API so the user can pick where to save.
+  if(window.showSaveFilePicker){
+    try{
+      const handle=await window.showSaveFilePicker({
+        suggestedName:name,
+        types:[{description:"Replay data",accept:{"application/octet-stream":[".dat"]}}],
+      });
+      const writable=await handle.createWritable();
+      await writable.write(blob);
+      await writable.close();
+      return true;
+    }catch(err){
+      if(err && err.name==="AbortError") return false; // user cancelled
+      // fall through to the download fallback on any other error
+    }
+  }
   const url=URL.createObjectURL(blob);
   const a=document.createElement("a"); a.href=url; a.download=name; a.click();
   setTimeout(()=>URL.revokeObjectURL(url),1000);
+  return true;
 }
 
 /* =====================================================================
@@ -705,7 +722,7 @@ function loadFile(f){
   r.readAsArrayBuffer(f);
 }
 
-document.getElementById("btn-split").addEventListener("click",()=>{
+document.getElementById("btn-split").addEventListener("click",async()=>{
   if(selectedPull<0) return;
   try{
     const opts={
@@ -714,8 +731,8 @@ document.getElementById("btn-split").addEventListener("click",()=>{
     };
     const bytes=buildPull(selectedPull,opts);
     const base=fileName.replace(/\.dat$/i,"");
-    download(bytes,`pull${pulls[selectedPull].n}_${base}.dat`);
-    toast(`Exported pull ${pulls[selectedPull].n} (${fmtBytes(bytes.length)}).`);
+    const saved=await download(bytes,`pull${pulls[selectedPull].n}_${base}.dat`);
+    if(saved) toast(`Exported pull ${pulls[selectedPull].n} (${fmtBytes(bytes.length)}).`);
   }catch(err){ toast(err.message,true); }
 });
 
@@ -727,11 +744,11 @@ document.getElementById("btn-anon").addEventListener("click",()=>{
   toast(`Anonymized ${players.length} names — export to save.`);
 });
 
-document.getElementById("btn-names").addEventListener("click",()=>{
+document.getElementById("btn-names").addEventListener("click",async()=>{
   try{
     const bytes=buildRenamedFull();
-    download(bytes,`RENAMED_${fileName}`);
-    toast(`Exported full recording with edited names (${fmtBytes(bytes.length)}).`);
+    const saved=await download(bytes,`RENAMED_${fileName}`);
+    if(saved) toast(`Exported full recording with edited names (${fmtBytes(bytes.length)}).`);
   }catch(err){ toast(err.message,true); }
 });
 
