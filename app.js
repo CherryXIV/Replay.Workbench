@@ -61,6 +61,7 @@ let chapters = [];       // {type,offset,ms}
 let pulls = [];          // pull chapters with computed ranges
 let players = [];        // {name, offsets:[...], jobIndex}
 let selectedPull = -1;
+let lastGhostsDropped = 0; // stale instance-load duplicates removed by the last buildPull
 
 /* ---- byte helpers (little-endian, like the game) ---- */
 const u16=(o)=>dv.getUint16(o,true);
@@ -399,10 +400,32 @@ function buildPull(idx,opts){
   let carryStart=p.respawnStart;
   if(carryStart<setupEnd) carryStart=pullIndex;
 
+  // Instance-load duplicates: the setup block spawns every actor present at
+  // zone-in. For pulls after the first, some of those (e.g. the boss's dormant
+  // intro copy) are stale — the despawn/cleanup that removes them lives in the
+  // gap between setup and the respawn batch, which this reconstruction drops, so
+  // carrying their spawn leaves a frozen ghost next to the real, re-spawned actor.
+  // Remove a setup NpcSpawn when the actor never appears in this pull AND a live
+  // actor of the same model is spawned in the pull (i.e. it is a true duplicate).
+  const pullOids=new Set(), liveModels=new Set();
+  const npcModel=(s)=> s.dataLength>=0x48 ? dv.getUint32(DATA_START+s.offset+SEG_HEADER+0x44,true) : -1;
+  for(let i=carryStart;i<endIndex;i++){
+    pullOids.add(segs[i].oid);
+    if(segs[i].opcode===SPAWN_OPCODE){ const m=npcModel(segs[i]); if(m>=0) liveModels.add(m); }
+  }
+  let ghostsDropped=0;
+
   const parts=[];
 
-  // 1) setup, original ms
-  for(let i=0;i<setupEnd;i++) parts.push(segRaw(src,segs[i]));
+  // 1) setup, original ms (minus stale instance-load duplicates)
+  for(let i=0;i<setupEnd;i++){
+    const s=segs[i];
+    if(s.opcode===SPAWN_OPCODE && !pullOids.has(s.oid)){
+      const m=npcModel(s);
+      if(m>=0 && liveModels.has(m)){ ghostsDropped++; continue; }
+    }
+    parts.push(segRaw(src,segs[i]));
+  }
 
   // 2+3) [respawn .. next pull], rebased; inject waymarks at the pull start
   let chapterNewOffset=-1, written=byteLen(parts);
@@ -435,6 +458,7 @@ function buildPull(idx,opts){
   cav.setUint32(8,chapterNewOffset>>>0,true);
   cav.setUint32(12,0,true);
 
+  lastGhostsDropped=ghostsDropped;
   return concat([header,ca,body]);
 }
 function injectWaymarks(src,parts,pullIndex){
@@ -554,9 +578,10 @@ document.getElementById("btn-split").addEventListener("click",async()=>{
     };
     const bytes=buildPull(selectedPull,opts);
     const note=applyTransposeIfChecked(bytes);
+    const ghosts=lastGhostsDropped ? ` · removed ${lastGhostsDropped} stale duplicate spawn${lastGhostsDropped>1?"s":""}` : "";
     const base=fileName.replace(/\.dat$/i,"");
     const saved=await download(bytes,`pull${pulls[selectedPull].n}_${base}.dat`);
-    if(saved) toast(`Exported pull ${pulls[selectedPull].n} (${fmtBytes(bytes.length)})${note}.`);
+    if(saved) toast(`Exported pull ${pulls[selectedPull].n} (${fmtBytes(bytes.length)})${note}${ghosts}.`);
   }catch(err){ toast(err.message,true); }
 });
 
