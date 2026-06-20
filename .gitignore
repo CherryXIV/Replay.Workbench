@@ -1,0 +1,10 @@
+# FFXIV duty recordings — local test data, never publish
+*.dat
+
+# Local dev-server / preview helper
+.claude/launch.json
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+desktop.ini

@@ -51,7 +51,14 @@
   }
   header.app h1 .dot{color:var(--phosphor)}
   header.app .sub{font-family:var(--mono);font-size:12px;color:var(--ink-dim)}
-  .tagline{color:var(--ink-dim);font-size:13px;margin-bottom:28px;max-width:60ch}
+  .tagline{color:var(--ink-dim);font-size:13px;margin-bottom:22px;max-width:64ch}
+
+  /* ---- tab switcher ---- */
+  .tabs-nav{margin-left:auto;display:flex;gap:8px}
+  .tabbtn{font-family:var(--mono);font-size:12px;color:var(--ink-dim);background:transparent;
+    border:1px solid var(--line);border-radius:var(--radius);padding:6px 14px;cursor:pointer;transition:all .12s}
+  .tabbtn:hover{color:var(--ink);border-color:var(--ink-faint)}
+  .tabbtn.cur{color:var(--phosphor);border-color:var(--phosphor-deep);background:rgba(57,212,200,.06)}
 
   /* ---- drop zone ---- */
   .drop{
@@ -59,10 +66,12 @@
     border:1px dashed var(--line);border-radius:var(--radius);
     background:linear-gradient(180deg,var(--panel),transparent);
     padding:48px 24px;text-align:center;cursor:pointer;
-    transition:border-color .15s,background .15s;
+    transition:border-color .15s,background .15s,padding .15s;
   }
   .drop:hover,.drop.over{border-color:var(--phosphor);background:rgba(57,212,200,.04)}
+  .drop.compact{padding:14px 24px}
   .drop .big{font-family:var(--mono);font-size:15px;color:var(--ink);margin-bottom:6px}
+  .drop.compact .big{font-size:12px;margin:0}
   .drop .small{font-size:12px;color:var(--ink-dim)}
   .drop .small b{color:var(--phosphor);font-weight:500}
   input[type=file]{display:none}
@@ -162,6 +171,40 @@
   .hint{font-family:var(--mono);font-size:11px;color:var(--ink-dim);margin-top:10px}
   .hidden{display:none !important}
 
+  /* ---- playback map ---- */
+  .layout{display:grid;grid-template-columns:1fr 240px;gap:0}
+  @media(max-width:760px){.layout{grid-template-columns:1fr}}
+  .stage-wrap{position:relative;height:480px;background:var(--bg);border-right:1px solid var(--line)}
+  @media(max-width:760px){.stage-wrap{border-right:none;border-bottom:1px solid var(--line);height:380px}}
+  canvas#stage{display:block;width:100%;height:100%;cursor:grab}
+  canvas#stage:active{cursor:grabbing}
+  .side{padding:12px 14px;overflow:auto;max-height:480px}
+  @media(max-width:760px){.side{max-height:260px}}
+  .side h3{font-family:var(--mono);font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-faint);margin-bottom:8px}
+  .leg-row{display:flex;align-items:center;gap:8px;padding:4px 2px;cursor:pointer;border-radius:4px}
+  .leg-row:hover{background:var(--panel-2)}
+  .leg-row input{accent-color:var(--phosphor);width:14px;height:14px}
+  .leg-row .sw{width:10px;height:10px;border-radius:2px;flex:none}
+  .leg-row .nm{font-family:var(--mono);font-size:12px;color:var(--ink);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .leg-row .cnt{font-family:var(--mono);font-size:10px;color:var(--ink-faint)}
+  #npc-note{font-family:var(--mono);font-size:10px;color:var(--ink-faint);margin-top:8px}
+  .transport{display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:14px 16px;border-top:1px solid var(--line);background:var(--panel-2)}
+  button.tbtn{font-family:var(--mono);font-size:13px;font-weight:500;background:var(--phosphor);color:#05201e;
+    border:none;border-radius:var(--radius);padding:9px 18px;cursor:pointer;transition:filter .12s}
+  button.tbtn:hover{filter:brightness(1.1)}
+  button.tbtn.playing{background:var(--amber);color:#2a1c02}
+  #scrub{flex:1;min-width:160px;accent-color:var(--phosphor)}
+  #clock{font-family:var(--mono);font-size:12px;color:var(--phosphor);min-width:96px;text-align:right}
+  .spds{display:flex;gap:4px}
+  .spd{font-family:var(--mono);font-size:11px;background:transparent;color:var(--ink-dim);
+    border:1px solid var(--line);border-radius:4px;padding:5px 8px;cursor:pointer}
+  .spd.on{color:var(--phosphor);border-color:var(--phosphor-deep);background:rgba(57,212,200,.06)}
+  .opts{display:flex;align-items:center;gap:16px;flex-wrap:wrap;padding:10px 16px;border-top:1px solid var(--line)}
+  .opt{display:flex;align-items:center;gap:7px;font-family:var(--mono);font-size:12px;color:var(--ink-dim);cursor:pointer}
+  .opt input{accent-color:var(--violet);width:14px;height:14px}
+  select#pullsel{font-family:var(--mono);font-size:12px;background:var(--bg);color:var(--ink);
+    border:1px solid var(--line);border-radius:4px;padding:6px 8px;max-width:100%}
+
   /* ---- toast ---- */
   #toast{
     position:fixed;left:50%;bottom:28px;transform:translateX(-50%) translateY(20px);
@@ -180,95 +223,148 @@
 <div class="wrap">
   <header class="app">
     <h1>Replay<span class="dot">.</span>Workbench</h1>
-    <span class="sub">FFXIV duty replay (.dat) inspector &amp; splitter</span>
+    <span class="sub">FFXIV duty replay (.dat) toolkit</span>
+    <nav class="tabs-nav">
+      <button class="tabbtn cur" data-tab="editor">Editor</button>
+      <button class="tabbtn" data-tab="playback">Playback</button>
+    </nav>
   </header>
-  <p class="tagline">Open an "A Realm Recorded"  recording to inspect its header, rename players,
-    and export a single pull as its own small, loadable file. Everything runs in your browser.
-    Your file never leaves your machine.</p>
+  <p class="tagline">Open an "A Realm Recorded" recording to inspect its header, rename players, and
+    export a single pull — or switch to <b style="color:var(--phosphor)">Playback</b> to scrub through
+    where every actor stood. Everything runs in your browser; your file never leaves your machine.</p>
 
-  <!-- drop zone -->
+  <!-- shared drop zone -->
   <label class="drop" id="drop" for="file">
     <div class="big">Drop a <b style="color:var(--phosphor)">.dat</b> here, or click to browse</div>
+    <div class="small">loaded once, shared by both tabs</div>
     <input type="file" id="file" accept=".dat">
   </label>
 
-  <!-- header readout -->
-  <section class="panel hidden" id="p-header">
-    <div class="head"><h2>Recording header</h2><span class="meta" id="h-file">—</span></div>
-    <div class="readout" id="readout"></div>
-  </section>
+  <div id="tabs" class="hidden">
 
-  <!-- timeline -->
-  <section class="panel hidden" id="p-timeline">
-    <div class="head"><h2>Pull timeline</h2><span class="meta" id="t-count">—</span></div>
-    <div class="timeline-wrap">
-      <div class="tl-axis" id="tlaxis"></div>
-      <div class="tl-legend">
-        <span><span class="sw" style="background:var(--phosphor)"></span>selected pull</span>
-        <span><span class="sw" style="background:var(--phosphor-deep)"></span>pull (wipe segment)</span>
-        <span><span class="sw" style="background:var(--violet)"></span>waymark placement</span>
-      </div>
-    </div>
-  </section>
+    <!-- ============ EDITOR TAB ============ -->
+    <div id="tab-editor">
+      <!-- header readout -->
+      <section class="panel hidden" id="p-header">
+        <div class="head"><h2>Recording header</h2><span class="meta" id="h-file">—</span></div>
+        <div class="readout" id="readout"></div>
+      </section>
 
-  <!-- pull table -->
-  <section class="panel hidden" id="p-pulls">
-    <div class="head"><h2>Pulls</h2><span class="meta" id="pull-sel">none selected</span></div>
-    <div class="body" style="padding:0">
-      <table class="pulls">
-        <thead><tr><th>#</th><th>type</th><th>starts</th><th>length</th><th>respawn batch</th></tr></thead>
-        <tbody id="pulltbody"></tbody>
-      </table>
-    </div>
-  </section>
+      <!-- timeline -->
+      <section class="panel hidden" id="p-timeline">
+        <div class="head"><h2>Pull timeline</h2><span class="meta" id="t-count">—</span></div>
+        <div class="timeline-wrap">
+          <div class="tl-axis" id="tlaxis"></div>
+          <div class="tl-legend">
+            <span><span class="sw" style="background:var(--phosphor)"></span>selected pull</span>
+            <span><span class="sw" style="background:var(--phosphor-deep)"></span>pull (wipe segment)</span>
+            <span><span class="sw" style="background:var(--violet)"></span>waymark placement</span>
+          </div>
+        </div>
+      </section>
 
-  <!-- players -->
-  <section class="panel hidden" id="p-players">
-    <div class="head"><h2>Players</h2>
-      <span style="display:flex;align-items:center;gap:12px">
-        <button class="ghost" id="btn-anon" style="padding:5px 12px;font-size:12px" title="Replace every name with Player 1, Player 2, …">Anonymize all names</button>
-        <span class="meta" id="pl-count">—</span>
-      </span></div>
-    <div class="body">
-      <div class="players" id="players"></div>
-      <div class="hint">Edit a name and it's rewritten everywhere it appears. Names are limited to 31 bytes. The <span style="color:var(--amber)">amber</span> player is the recorder.</div>
-    </div>
-  </section>
+      <!-- pull table -->
+      <section class="panel hidden" id="p-pulls">
+        <div class="head"><h2>Pulls</h2><span class="meta" id="pull-sel">none selected</span></div>
+        <div class="body" style="padding:0">
+          <table class="pulls">
+            <thead><tr><th>#</th><th>type</th><th>starts</th><th>length</th><th>respawn batch</th></tr></thead>
+            <tbody id="pulltbody"></tbody>
+          </table>
+        </div>
+      </section>
 
-  <!-- controls -->
-  <section class="panel hidden" id="p-controls">
-    <div class="head"><h2>Export</h2><span class="meta">single pull → .dat</span></div>
-    <div class="body">
-      <div class="controls">
-        <label class="check" id="wm-check">
-          <input type="checkbox" id="wm" checked>
-          <span class="box"></span>
-          <span class="lbl">Re-apply waymarks
-            <small id="wm-sub">carry the latest placement into the pull</small></span>
-        </label>
-        <label class="check" id="names-check">
-          <input type="checkbox" id="applynames" checked>
-          <span class="box"></span>
-          <span class="lbl">Apply name edits
-            <small>use the names above in the exported file</small></span>
-        </label>
-        <label class="check disabled" id="transpose-check">
-          <input type="checkbox" id="transpose" disabled>
-          <span class="box"></span>
-          <span class="lbl">Transpose opcodes → latest
-            <small id="transpose-sub">remap packets so the current client reads them</small></span>
-        </label>
-        <div class="spacer"></div>
-        <button class="ghost" id="btn-names" title="Save the whole recording with edited names, nothing split">Export renamed full file</button>
-        <button class="act" id="btn-split" disabled>Export selected pull</button>
-      </div>
-      <div class="hint" id="export-hint">Select a pull from the timeline or table to enable export.</div>
+      <!-- players -->
+      <section class="panel hidden" id="p-players">
+        <div class="head"><h2>Players</h2>
+          <span style="display:flex;align-items:center;gap:12px">
+            <button class="ghost" id="btn-anon" style="padding:5px 12px;font-size:12px" title="Replace every name with Player 1, Player 2, …">Anonymize all names</button>
+            <span class="meta" id="pl-count">—</span>
+          </span></div>
+        <div class="body">
+          <div class="players" id="players"></div>
+          <div class="hint">Edit a name and it's rewritten everywhere it appears — and reflected live on the Playback map. Names are limited to 31 bytes. The <span style="color:var(--amber)">amber</span> player is the recorder.</div>
+        </div>
+      </section>
+
+      <!-- controls -->
+      <section class="panel hidden" id="p-controls">
+        <div class="head"><h2>Export</h2><span class="meta">single pull → .dat</span></div>
+        <div class="body">
+          <div class="controls">
+            <label class="check" id="wm-check">
+              <input type="checkbox" id="wm" checked>
+              <span class="box"></span>
+              <span class="lbl">Re-apply waymarks
+                <small id="wm-sub">carry the latest placement into the pull</small></span>
+            </label>
+            <label class="check" id="names-check">
+              <input type="checkbox" id="applynames" checked>
+              <span class="box"></span>
+              <span class="lbl">Apply name edits
+                <small>use the names above in the exported file</small></span>
+            </label>
+            <label class="check disabled" id="transpose-check">
+              <input type="checkbox" id="transpose" disabled>
+              <span class="box"></span>
+              <span class="lbl">Transpose opcodes → latest
+                <small id="transpose-sub">remap packets so the current client reads them</small></span>
+            </label>
+            <div class="spacer"></div>
+            <button class="ghost" id="btn-names" title="Save the whole recording with edited names, nothing split">Export renamed full file</button>
+            <button class="act" id="btn-split" disabled>Export selected pull</button>
+          </div>
+          <div class="hint" id="export-hint">Select a pull from the timeline or table to enable export.</div>
+        </div>
+      </section>
     </div>
-  </section>
+
+    <!-- ============ PLAYBACK TAB ============ -->
+    <div id="tab-playback" class="hidden">
+      <section class="panel" id="viewer">
+        <div class="head">
+          <h2>Map playback</h2>
+          <span class="meta" id="meta">—</span>
+        </div>
+        <div style="padding:12px 16px 0">
+          <select id="pullsel"></select>
+        </div>
+        <div class="layout">
+          <div class="stage-wrap"><canvas id="stage"></canvas></div>
+          <div class="side">
+            <h3>Actors</h3>
+            <div id="legend"></div>
+            <div id="npc-note"></div>
+          </div>
+        </div>
+        <div class="transport">
+          <button class="tbtn" id="btn-play">▶ Play</button>
+          <input type="range" id="scrub" min="0" max="1000" value="0">
+          <span id="clock">00:00 / 00:00</span>
+          <span class="spds">
+            <button class="spd" data-s="0.5">0.5×</button>
+            <button class="spd on" data-s="1">1×</button>
+            <button class="spd" data-s="2">2×</button>
+            <button class="spd" data-s="4">4×</button>
+          </span>
+        </div>
+        <div class="opts">
+          <label class="opt"><input type="checkbox" id="chk-trail" checked> motion trails</label>
+          <label class="opt"><input type="checkbox" id="chk-cast" checked> cast pulses</label>
+          <label class="opt"><input type="checkbox" id="chk-waymark" checked> waymarks</label>
+          <label class="opt"><input type="checkbox" id="chk-npc"> show NPCs / unnamed actors</label>
+          <span style="color:var(--ink-faint)">scroll = zoom · drag = pan · dbl-click = reset · space = play · ←/→ = step</span>
+        </div>
+      </section>
+      <p class="hint">Named dots are players (renaming them in the Editor updates them here); the amber ring marks the recorder.
+        Pick a single pull from the dropdown to watch just that attempt.</p>
+    </div>
+
+  </div>
 
   <footer>
     <div><b>replay.workbench</b> · client-side only · no upload</div>
-    <div>setup + wipe-respawn + waymark reconstruction · header &amp; player editing</div>
+    <div>pull splitting &amp; player editing · positional playback from movement packets</div>
   </footer>
 </div>
 
@@ -276,5 +372,7 @@
 
 <script src="opcodes.js"></script>
 <script src="app.js"></script>
+<script src="timeline.js"></script>
+<script src="shell.js"></script>
 </body>
 </html>
