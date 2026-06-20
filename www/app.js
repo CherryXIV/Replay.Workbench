@@ -189,7 +189,8 @@ function parse(buffer){
     // restart — so we end combat at that reset (the next pull's respawn batch).
     const combatEnd = (n<pullChapters.length-1) ? findRespawnBatchStart(endIndex) : endIndex;
     const combat=combatSpan(startIndex,combatEnd);
-    let countdown=findCountdownChapter(pc);
+    const nextMs = (n<pullChapters.length-1) ? pullChapters[n+1].ms : Infinity;
+    let countdown=findCountdownChapter(pc,nextMs);
     let countdownIndex=(countdown && o2i.has(countdown.offset)) ? o2i.get(countdown.offset) : -1;
     if(countdownIndex<0) countdown=null; // no segment to anchor to -> can't keep it
     return {chapter:pc,n:n+1,startIndex,endIndex,lengthMs:Math.max(0,lastMs-pc.ms),
@@ -252,19 +253,18 @@ function combatSpan(startIndex,endIndex){
   return {ms:Math.max(0,actMs[end]-startMs)};
 }
 
-/* The countdown chapter that belongs to a pull: the last Countdown chapter
-   immediately before the pull start, within a sane window (a /countdown runs
-   <=30s, so anything much further off is a stale/earlier countdown, not this
-   pull's). Returns the chapter, or null. */
-const COUNTDOWN_WINDOW_MS = 45000;
-function findCountdownChapter(pullChapter){
-  let best=null;
+/* The countdown chapter that belongs to a pull. Despite the name, the game logs
+   a type-1 "Countdown" chapter at the *engage* — the moment the countdown ends
+   and the boss fight starts (FFXIVClientStructs: Countdown = "Start of boss
+   fight"). It therefore sits just *after* the pull's Start/Restart chapter, not
+   before it. So it's the first Countdown chapter strictly after this pull's
+   start and before the next pull begins. Returns the chapter, or null. */
+function findCountdownChapter(pullChapter,nextMs){
   for(const c of chapters){
-    if(c.ms>=pullChapter.ms) break;
-    if(COUNTDOWN_CHAPTER_TYPES.includes(c.type)) best=c;
-    else if(PULL_START_TYPES.includes(c.type)) best=null; // a newer pull resets it
+    if(c.ms<=pullChapter.ms) continue;
+    if(c.ms>=nextMs) break;
+    if(COUNTDOWN_CHAPTER_TYPES.includes(c.type)) return c;
   }
-  if(best && pullChapter.ms-best.ms<=COUNTDOWN_WINDOW_MS) return best;
   return null;
 }
 
@@ -384,7 +384,7 @@ function renderPullTable(){
   pulls.forEach((p,idx)=>{
     const tr=document.createElement("tr");
     if(idx===selectedPull) tr.className="sel";
-    const cd = p.countdown ? `<span class="cd" title="countdown ${fmtClock(p.chapter.ms-p.countdown.ms)} before this pull">⏱</span>` : "";
+    const cd = p.countdown ? `<span class="cd" title="engage (countdown chapter) ${fmtClock(p.countdown.ms-p.chapter.ms)} into this pull">⏱</span>` : "";
     tr.innerHTML=`<td class="num">${p.n}</td>
       <td>${CHAPTER_TYPE_NAMES[p.chapter.type]||p.chapter.type}${cd}</td>
       <td>${fmtClock(p.chapter.ms)}</td>
@@ -481,13 +481,15 @@ function buildPull(idx,opts){
   let carryStart=p.respawnStart;
   if(carryStart<setupEnd) carryStart=pullIndex;
 
-  // Keep this pull's countdown: extend the carried range back to the countdown
-  // chapter (it sits a little before the respawn batch) and rebase the timeline
-  // to it, so the exported file opens on the "5..4..3.." instead of mid-pull.
-  const cdOn = opts.countdown && p.countdownIndex>=setupEnd && p.countdownIndex<carryStart;
-  if(cdOn) carryStart=p.countdownIndex;
+  const anchorMs = pullStartMs; // timeline zero for the carried range
+
+  // Keep this pull's countdown: the game's type-1 "Countdown" chapter marks the
+  // engage (start of the boss fight), which sits inside the pull, just after the
+  // Start/Restart. It's already within the carried range, so we don't move any
+  // boundaries — we just emit a second chapter entry for it so the exported file
+  // exposes the engage as a selectable chapter (jump straight to the fight).
+  const cdOn = opts.countdown && p.countdownIndex>=pullIndex && p.countdownIndex<endIndex;
   const countdownIndex = cdOn ? p.countdownIndex : -1;
-  const anchorMs = cdOn ? p.countdown.ms : pullStartMs; // timeline zero for the carried range
 
   // Instance-load duplicates: the setup block spawns every actor present at
   // zone-in. For pulls after the first, some of those (e.g. the boss's dormant
@@ -540,17 +542,18 @@ function buildPull(idx,opts){
   hv.setUint32(OFF_TOTAL_MS,lastMs>>>0,true);
   hv.setUint32(OFF_DISPLAYED_MS,lastMs>>>0,true);
 
-  // chapter array: the countdown (if kept) then the pull start
+  // chapter array: the pull start, then the countdown/engage (if kept). Chapters
+  // are ascending: the Start/Restart comes first, the engage a little later.
   const ca=new Uint8Array(CHAPTER_ARRAY);
   const cav=new DataView(ca.buffer);
   if(cdOn && countdownNewOffset>=0){
     cav.setInt32(0,2,true);
-    cav.setInt32(4,p.countdown.type,true);                        // chapter[0] = countdown
-    cav.setUint32(8,countdownNewOffset>>>0,true);
-    cav.setUint32(12,Math.max(0,p.countdown.ms-anchorMs)>>>0,true);
-    cav.setInt32(4+CHAPTER_ENTRY,p.chapter.type,true);            // chapter[1] = start/restart
-    cav.setUint32(8+CHAPTER_ENTRY,chapterNewOffset>>>0,true);
-    cav.setUint32(12+CHAPTER_ENTRY,Math.max(0,pullStartMs-anchorMs)>>>0,true);
+    cav.setInt32(4,p.chapter.type,true);                          // chapter[0] = start/restart
+    cav.setUint32(8,chapterNewOffset>>>0,true);
+    cav.setUint32(12,Math.max(0,pullStartMs-anchorMs)>>>0,true);
+    cav.setInt32(4+CHAPTER_ENTRY,p.countdown.type,true);          // chapter[1] = countdown/engage
+    cav.setUint32(8+CHAPTER_ENTRY,countdownNewOffset>>>0,true);
+    cav.setUint32(12+CHAPTER_ENTRY,Math.max(0,p.countdown.ms-anchorMs)>>>0,true);
   } else {
     cav.setInt32(0,1,true);
     cav.setInt32(4,p.chapter.type,true);
