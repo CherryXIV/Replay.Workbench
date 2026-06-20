@@ -40,6 +40,22 @@ const DIRECTOR_OPCODE = 0x03E4;
 let SPAWN_OPCODE = 0x0113;          // NpcSpawn
 let WAYMARK_OPCODE = 0x0255;        // PlaceFieldMarker
 let WAYMARK_PRESET_OPCODE = 0x02AB; // PlaceFieldMarkerPreset
+/* Opcodes for combat timing (resolved per patch in resolveOpcodes()).
+   FirstAttack fires on the first hit against the boss — the real engage — which
+   is what starts the combat timer. COMBAT_OPS (casts/effects) mark combat
+   actions; their last one ends combat, and their first one is the fallback start
+   for the rare pull whose engage had no fresh FirstAttack. */
+let FIRST_ATTACK_OPCODE = 0;
+let COMBAT_OPS = new Set();
+/* Chapter types that mark a countdown (1 = Countdown, 3 = Countdown(3)). */
+const COUNTDOWN_CHAPTER_TYPES = [1,3];
+/* Real combat is continuous (an action every couple seconds), so we split combat
+   actions into clusters separated by idle gaps longer than this. A tiny trailing
+   cluster (fewer actions than COMBAT_MIN_CLUSTER) after such a gap is post-fight
+   noise — a DoT tick or stray cast seconds after the boss died / the party wiped —
+   and is trimmed; a real combat segment is always far denser. */
+const COMBAT_GAP_MS = 10000;
+const COMBAT_MIN_CLUSTER = 8;
 const BATCH_LOOKBACK = 8000;
 const BATCH_MS_WINDOW = 2000;
 const MIN_BATCH_SPAWNS = 20;
@@ -91,6 +107,11 @@ function resolveOpcodes(build){
     // unknown build: keep the latest-patch defaults
     SPAWN_OPCODE=0x0113; WAYMARK_OPCODE=0x0255; WAYMARK_PRESET_OPCODE=0x02AB;
   }
+  COMBAT_OPS=new Set();
+  for(const name of ["ActorCast","Effect","AoeEffect8","AoeEffect16","AoeEffect24","AoeEffect32"]){
+    if(t && t[name]!=null) COMBAT_OPS.add(t[name]);
+  }
+  FIRST_ATTACK_OPCODE = (t && t.FirstAttack!=null) ? t.FirstAttack : 0;
 }
 
 // Build an old->new opcode map by matching IPC names between two patch tables.
@@ -154,6 +175,7 @@ function parse(buffer){
 
   // pull chapters with ranges
   const o2i=new Map(segs.map((s,i)=>[s.offset,i]));
+  const chapIndex=new Map(chapters.map((c,i)=>[c,i]));
   const pullChapters=chapters.filter(c=>PULL_START_TYPES.includes(c.type));
   pulls = pullChapters.map((pc,n)=>{
     const startIndex=o2i.get(pc.offset);
@@ -161,7 +183,17 @@ function parse(buffer){
     const lastMs = endIndex>startIndex ? segs[endIndex-1].ms : pc.ms;
     const respawnStart=findRespawnBatchStart(startIndex);
     const batchCount=countSpawns(respawnStart,startIndex);
-    return {chapter:pc,n:n+1,startIndex,endIndex,lengthMs:Math.max(0,lastMs-pc.ms),respawnStart,batchCount};
+    // Cap combat at the wipe: when the party dies the arena resets (mass despawn
+    // then re-spawn for the next attempt). Post-wipe DoT ticks and the reset's own
+    // spawn effects keep firing for several seconds after — and run almost to the
+    // restart — so we end combat at that reset (the next pull's respawn batch).
+    const combatEnd = (n<pullChapters.length-1) ? findRespawnBatchStart(endIndex) : endIndex;
+    const combat=combatSpan(startIndex,combatEnd);
+    let countdown=findCountdownChapter(pc);
+    let countdownIndex=(countdown && o2i.has(countdown.offset)) ? o2i.get(countdown.offset) : -1;
+    if(countdownIndex<0) countdown=null; // no segment to anchor to -> can't keep it
+    return {chapter:pc,n:n+1,startIndex,endIndex,lengthMs:Math.max(0,lastMs-pc.ms),
+            respawnStart,batchCount,combatMs:combat.ms,countdown,countdownIndex};
   });
 
   // players: scan 32-byte name fields
@@ -188,6 +220,53 @@ function findRespawnBatchStart(pullIndex){
   return Math.min(...chosen);
 }
 function countSpawns(a,b){let n=0;for(let i=a;i<b;i++)if(segs[i].opcode===SPAWN_OPCODE)n++;return n;}
+
+/* Actual combat time within a pull: the real engage to the last combat action.
+   The engage is the first FirstAttack (first hit on the boss), which excludes the
+   countdown, run-in and pre-pull casts. If a pull's engage produced no fresh
+   FirstAttack (a wipe-recovery re-pull) its first FirstAttack is actually a late
+   add — detected by lots of combat already having happened before it — so we fall
+   back to the first combat action there. */
+function combatSpan(startIndex,endIndex){
+  const actMs=[]; const faMarks=[];
+  for(let i=startIndex;i<endIndex;i++){
+    const op=segs[i].opcode;
+    if(op===FIRST_ATTACK_OPCODE) faMarks.push({ms:segs[i].ms,before:actMs.length});
+    else if(COMBAT_OPS.has(op)) actMs.push(segs[i].ms);
+  }
+  if(actMs.length===0) return {ms:0};
+  // engage = first FirstAttack with <15% of the pull's combat actions before it
+  let startMs=actMs[0];
+  for(const m of faMarks){ if(m.before < actMs.length*0.15){ startMs=m.ms; break; } }
+  // end = drop trailing post-fight noise: peel off small gap-separated clusters
+  // (DoT ticks / stray casts after the kill or wipe) until reaching the dense
+  // combat. A mid-fight intermission gap is followed by a large cluster, so the
+  // real fight is never trimmed.
+  let end=actMs.length-1;
+  while(end>0){
+    let cs=end; // start of the cluster ending at `end`
+    while(cs>0 && actMs[cs]-actMs[cs-1] <= COMBAT_GAP_MS) cs--;
+    if(cs>0 && (end-cs+1) < COMBAT_MIN_CLUSTER) end=cs-1; // trailing noise cluster
+    else break;
+  }
+  return {ms:Math.max(0,actMs[end]-startMs)};
+}
+
+/* The countdown chapter that belongs to a pull: the last Countdown chapter
+   immediately before the pull start, within a sane window (a /countdown runs
+   <=30s, so anything much further off is a stale/earlier countdown, not this
+   pull's). Returns the chapter, or null. */
+const COUNTDOWN_WINDOW_MS = 45000;
+function findCountdownChapter(pullChapter){
+  let best=null;
+  for(const c of chapters){
+    if(c.ms>=pullChapter.ms) break;
+    if(COUNTDOWN_CHAPTER_TYPES.includes(c.type)) best=c;
+    else if(PULL_START_TYPES.includes(c.type)) best=null; // a newer pull resets it
+  }
+  if(best && pullChapter.ms-best.ms<=COUNTDOWN_WINDOW_MS) return best;
+  return null;
+}
 
 function findPlayers(){
   // a 32-byte field: "First Last\0" + null padding, two cap-initial parts
@@ -305,10 +384,12 @@ function renderPullTable(){
   pulls.forEach((p,idx)=>{
     const tr=document.createElement("tr");
     if(idx===selectedPull) tr.className="sel";
+    const cd = p.countdown ? `<span class="cd" title="countdown ${fmtClock(p.chapter.ms-p.countdown.ms)} before this pull">⏱</span>` : "";
     tr.innerHTML=`<td class="num">${p.n}</td>
-      <td>${CHAPTER_TYPE_NAMES[p.chapter.type]||p.chapter.type}</td>
+      <td>${CHAPTER_TYPE_NAMES[p.chapter.type]||p.chapter.type}${cd}</td>
       <td>${fmtClock(p.chapter.ms)}</td>
       <td class="dim">${fmtClock(p.lengthMs)}</td>
+      <td class="num">${p.combatMs?fmtClock(p.combatMs):'<span class="dim">—</span>'}</td>
       <td class="dim">${p.batchCount} spawns</td>`;
     tr.onclick=()=>selectPull(idx);
     tb.appendChild(tr);
@@ -400,6 +481,14 @@ function buildPull(idx,opts){
   let carryStart=p.respawnStart;
   if(carryStart<setupEnd) carryStart=pullIndex;
 
+  // Keep this pull's countdown: extend the carried range back to the countdown
+  // chapter (it sits a little before the respawn batch) and rebase the timeline
+  // to it, so the exported file opens on the "5..4..3.." instead of mid-pull.
+  const cdOn = opts.countdown && p.countdownIndex>=setupEnd && p.countdownIndex<carryStart;
+  if(cdOn) carryStart=p.countdownIndex;
+  const countdownIndex = cdOn ? p.countdownIndex : -1;
+  const anchorMs = cdOn ? p.countdown.ms : pullStartMs; // timeline zero for the carried range
+
   // Instance-load duplicates: the setup block spawns every actor present at
   // zone-in. For pulls after the first, some of those (e.g. the boss's dormant
   // intro copy) are stale — the despawn/cleanup that removes them lives in the
@@ -427,21 +516,22 @@ function buildPull(idx,opts){
     parts.push(segRaw(src,segs[i]));
   }
 
-  // 2+3) [respawn .. next pull], rebased; inject waymarks at the pull start
-  let chapterNewOffset=-1, written=byteLen(parts);
+  // 2+3) [countdown/respawn .. next pull], rebased; inject waymarks at the pull start
+  let chapterNewOffset=-1, countdownNewOffset=-1, written=byteLen(parts);
   for(let i=carryStart;i<endIndex;i++){
+    if(i===countdownIndex) countdownNewOffset=byteLen(parts);
     if(i===pullIndex){
       // chapter points at the pull start (the waymark packets are emitted here at ms=0,
       // right before the pull's own first packet — same as the validated Python splitter)
       chapterNewOffset=byteLen(parts);
       if(opts.waymarks) injectWaymarks(src,parts,pullIndex);
     }
-    parts.push(rebasedSeg(src,segs[i],segs[i].ms-pullStartMs));
+    parts.push(rebasedSeg(src,segs[i],segs[i].ms-anchorMs));
   }
   if(chapterNewOffset<0) chapterNewOffset=byteLen(parts);
 
   const body=concat(parts);
-  const lastMs = endIndex>carryStart ? Math.max(0,segs[endIndex-1].ms-pullStartMs):0;
+  const lastMs = endIndex>carryStart ? Math.max(0,segs[endIndex-1].ms-anchorMs):0;
 
   // header
   const header=src.slice(0,HEADER_SIZE);
@@ -450,13 +540,23 @@ function buildPull(idx,opts){
   hv.setUint32(OFF_TOTAL_MS,lastMs>>>0,true);
   hv.setUint32(OFF_DISPLAYED_MS,lastMs>>>0,true);
 
-  // chapter array: single chapter at the pull start
+  // chapter array: the countdown (if kept) then the pull start
   const ca=new Uint8Array(CHAPTER_ARRAY);
   const cav=new DataView(ca.buffer);
-  cav.setInt32(0,1,true);
-  cav.setInt32(4,p.chapter.type,true);
-  cav.setUint32(8,chapterNewOffset>>>0,true);
-  cav.setUint32(12,0,true);
+  if(cdOn && countdownNewOffset>=0){
+    cav.setInt32(0,2,true);
+    cav.setInt32(4,p.countdown.type,true);                        // chapter[0] = countdown
+    cav.setUint32(8,countdownNewOffset>>>0,true);
+    cav.setUint32(12,Math.max(0,p.countdown.ms-anchorMs)>>>0,true);
+    cav.setInt32(4+CHAPTER_ENTRY,p.chapter.type,true);            // chapter[1] = start/restart
+    cav.setUint32(8+CHAPTER_ENTRY,chapterNewOffset>>>0,true);
+    cav.setUint32(12+CHAPTER_ENTRY,Math.max(0,pullStartMs-anchorMs)>>>0,true);
+  } else {
+    cav.setInt32(0,1,true);
+    cav.setInt32(4,p.chapter.type,true);
+    cav.setUint32(8,chapterNewOffset>>>0,true);
+    cav.setUint32(12,0,true);
+  }
 
   lastGhostsDropped=ghostsDropped;
   return concat([header,ca,body]);
@@ -575,6 +675,7 @@ document.getElementById("btn-split").addEventListener("click",async()=>{
     const opts={
       waymarks: document.getElementById("wm").checked,
       applyNames: document.getElementById("applynames").checked,
+      countdown: document.getElementById("keepcd").checked,
     };
     const bytes=buildPull(selectedPull,opts);
     const note=applyTransposeIfChecked(bytes);
