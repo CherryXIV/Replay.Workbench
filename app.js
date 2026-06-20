@@ -1,4 +1,7 @@
 "use strict";
+/* The inspector runs as a self-contained module (window.Inspector) so it can
+   share a page with the playback module without their globals colliding. */
+(function(){
 /* =====================================================================
    FFXIVReplay .dat — format constants (from the FFXIVReplay struct)
    Header        : 0x68 bytes
@@ -189,7 +192,9 @@ function findPlayers(){
   // a 32-byte field: "First Last\0" + null padding, two cap-initial parts
   const found=new Map(); const order=[];
   const isUpper=(b)=>b>=65&&b<=90;
-  const isNameChar=(b)=>(b>=65&&b<=90)||(b>=97&&b<=122)||b===32||b===39||b===45;
+  // digits are allowed so the scanner reads our own anonymized "Player N" fields
+  // to the end; looksLikeName() still gates what actually counts as a name.
+  const isNameChar=(b)=>(b>=65&&b<=90)||(b>=97&&b<=122)||(b>=48&&b<=57)||b===32||b===39||b===45;
   for(let i=0;i+32<=DATA_START+segDataBytes();i++){
     if(!isUpper(raw[i])) continue;
     let len=0; while(len<32 && isNameChar(raw[i+len])) len++;
@@ -206,6 +211,7 @@ function findPlayers(){
 }
 function segDataBytes(){return i32(OFF_REPLAY_LEN);}
 function looksLikeName(s){
+  if(/^Player \d{1,3}$/.test(s)) return true; // anonymized names this tool writes
   const parts=s.split(" ");
   if(parts.length!==2) return false;
   for(const p of parts){
@@ -324,6 +330,7 @@ function renderPlayers(){
   wrap.querySelectorAll("input").forEach(inp=>{
     inp.addEventListener("input",e=>{
       players[+e.target.dataset.idx].newName=e.target.value;
+      emitNames();
     });
   });
 }
@@ -478,19 +485,18 @@ async function download(bytes,name){
 /* =====================================================================
    Wire up
    ===================================================================== */
-const drop=document.getElementById("drop");
-const fileInput=document.getElementById("file");
-["dragenter","dragover"].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.add("over");}));
-["dragleave","drop"].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.remove("over");}));
-drop.addEventListener("drop",e=>{const f=e.dataTransfer.files[0]; if(f) loadFile(f);});
-fileInput.addEventListener("change",e=>{const f=e.target.files[0]; if(f) loadFile(f);});
+// Broadcast the current name map so the playback module can relabel dots live.
+function emitNames(){
+  const map={};
+  for(const p of players){ map[p.name] = (p.newName!==undefined ? p.newName : p.name); }
+  document.dispatchEvent(new CustomEvent("rw-names",{detail:map}));
+}
 
-function loadFile(f){
-  fileName=f.name;
-  const r=new FileReader();
-  r.onload=()=>{
+function loadBytes(name, buffer){
+  fileName=name;
+  {
     try{
-      parse(r.result);
+      parse(buffer);
       // waymark availability for the checkbox
       const hasWaymark = segs.some(s=>(s.opcode===WAYMARK_PRESET_OPCODE&&!isEmptyPreset(s))||s.opcode===WAYMARK_OPCODE);
       const wmCheck=document.getElementById("wm-check"), wm=document.getElementById("wm"), wmSub=document.getElementById("wm-sub");
@@ -520,9 +526,9 @@ function loadFile(f){
       document.getElementById("pull-sel").textContent="none selected";
       document.getElementById("export-hint").textContent="Select a pull from the timeline or table to enable export.";
       toast(`Loaded ${pulls.length} pulls, ${players.length} players.`);
+      emitNames(); // sync playback to the freshly loaded (unedited) names
     }catch(err){ toast(err.message,true); }
-  };
-  r.readAsArrayBuffer(f);
+  }
 }
 
 // If "Transpose opcodes" is on, remap every packet to the latest patch and stamp the
@@ -559,6 +565,7 @@ document.getElementById("btn-anon").addEventListener("click",()=>{
   document.querySelectorAll("#players input").forEach(inp=>{
     inp.value=players[+inp.dataset.idx].newName;
   });
+  emitNames();
   toast(`Anonymized ${players.length} names — export to save.`);
 });
 
@@ -577,3 +584,7 @@ function toast(msg,isErr=false){
   t.textContent=msg; t.className="show"+(isErr?" err":"");
   clearTimeout(toastTimer); toastTimer=setTimeout(()=>t.className=isErr?"err":"",2600);
 }
+
+/* Public API — the shell loads the file and feeds both modules. */
+window.Inspector = { load: loadBytes };
+})();
