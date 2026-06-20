@@ -126,6 +126,7 @@
   table.pulls tr.sel td:first-child{box-shadow:inset 3px 0 0 var(--phosphor)}
   table.pulls .num{color:var(--phosphor)}
   table.pulls .dim{color:var(--ink-dim)}
+  table.pulls .cd{margin-left:6px;color:var(--amber);font-size:11px;cursor:help}
 
   /* ---- players ---- */
   .players{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:10px}
@@ -268,7 +269,7 @@
         <div class="head"><h2>Pulls</h2><span class="meta" id="pull-sel">none selected</span></div>
         <div class="body" style="padding:0">
           <table class="pulls">
-            <thead><tr><th>#</th><th>type</th><th>starts</th><th>length</th><th>respawn batch</th></tr></thead>
+            <thead><tr><th>#</th><th>type</th><th>starts</th><th>length</th><th>combat</th><th>respawn batch</th></tr></thead>
             <tbody id="pulltbody"></tbody>
           </table>
         </div>
@@ -303,6 +304,12 @@
               <span class="box"></span>
               <span class="lbl">Apply name edits
                 <small>use the names above in the exported file</small></span>
+            </label>
+            <label class="check" id="cd-check">
+              <input type="checkbox" id="keepcd" checked>
+              <span class="box"></span>
+              <span class="lbl">Keep countdown
+                <small>open the pull on its “3..2..1” lead-in</small></span>
             </label>
             <label class="check disabled" id="transpose-check">
               <input type="checkbox" id="transpose" disabled>
