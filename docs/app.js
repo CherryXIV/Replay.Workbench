@@ -714,6 +714,90 @@ function toast(msg,isErr=false){
   clearTimeout(toastTimer); toastTimer=setTimeout(()=>t.className=isErr?"err":"",2600);
 }
 
+/* =====================================================================
+   Dev menu — Konami code (↑ ↑ ↓ ↓ ← → ← →) opens a panel to register an
+   opcode table + build number at runtime, so a new game patch can be tested
+   before it's baked into opcodes.js. The table is added to OPCODE_TABLES /
+   BUILD_TO_PATCH and the loaded file (if any) is re-parsed so it takes effect
+   immediately. Nothing is persisted — it lives for the life of the tab.
+   ===================================================================== */
+const KONAMI=["ArrowUp","ArrowUp","ArrowDown","ArrowDown","ArrowLeft","ArrowRight","ArrowLeft","ArrowRight"];
+const DEV_HINT_DEFAULT="Registers this opcode table for the build, then re-parses the loaded file. Plain {name:opcode} maps and a full FFXIVOpcodes opcodes.json are both accepted.";
+let konamiPos=0;
+document.addEventListener("keydown",e=>{
+  // don't capture arrows while the user is typing in a field
+  const t=e.target;
+  if(t && (t.tagName==="INPUT"||t.tagName==="TEXTAREA"||t.isContentEditable)){ konamiPos=0; return; }
+  if(e.key===KONAMI[konamiPos]) konamiPos++;
+  else konamiPos = (e.key===KONAMI[0]) ? 1 : 0;
+  if(konamiPos===KONAMI.length){ konamiPos=0; openDevMenu(); }
+});
+
+const $dev=(id)=>document.getElementById(id);
+function openDevMenu(){
+  if(fileBuild) $dev("dev-build").value=String(fileBuild);
+  devHint(DEV_HINT_DEFAULT,false);
+  $dev("devmenu").classList.remove("hidden");
+  $dev("dev-json").focus();
+}
+function closeDevMenu(){ $dev("devmenu").classList.add("hidden"); }
+function devHint(msg,isErr){ const h=$dev("dev-hint"); h.textContent=msg; h.classList.toggle("dev-err",!!isErr); }
+
+// Accept either a plain {name:opcode} object or a FFXIVOpcodes opcodes.json
+// (array of regions, or one region object). Returns a {name:opcode} map or null.
+function normalizeOpcodeTable(parsed){
+  if(parsed && typeof parsed==="object" && !Array.isArray(parsed) && !parsed.lists && !parsed.region){
+    const out={};
+    for(const k in parsed){ const v=parsed[k]; if(Number.isFinite(v)) out[k]=v; }
+    if(Object.keys(out).length) return out;
+  }
+  const regions = Array.isArray(parsed) ? parsed : (parsed && parsed.lists ? [parsed] : null);
+  if(regions){
+    const r = regions.find(x=>x && x.region==="Global") || regions[0];
+    const list = r && r.lists && r.lists.ServerZoneIpcType;
+    if(Array.isArray(list)){
+      const out={};
+      for(const e of list){ if(e && typeof e.name==="string" && Number.isFinite(e.opcode)) out[e.name]=e.opcode; }
+      if(Object.keys(out).length) return out;
+    }
+  }
+  return null;
+}
+
+function applyDevMenu(){
+  const buildRaw=$dev("dev-build").value.trim();
+  const build=Number(buildRaw);
+  if(!buildRaw || !Number.isInteger(build) || build<=0){ devHint("Enter a valid positive integer build number.",true); return; }
+  let parsed;
+  try{ parsed=JSON.parse($dev("dev-json").value); }
+  catch(err){ devHint("Opcodes JSON didn't parse: "+err.message,true); return; }
+  const table=normalizeOpcodeTable(parsed);
+  if(!table){ devHint("Couldn't read an opcode table from that JSON (expected {name:opcode} or a FFXIVOpcodes opcodes.json).",true); return; }
+
+  const patchKey="custom-"+build;
+  OPCODE_TABLES[patchKey]=table;
+  BUILD_TO_PATCH[build]=patchKey;
+  const n=Object.keys(table).length;
+  closeDevMenu();
+
+  if(raw){
+    try{ loadBytes(fileName, raw.buffer.slice(0)); toast(`Registered ${n} opcodes for build ${build} — re-parsed ${fileName}.`); }
+    catch(err){ toast(err.message,true); }
+  } else {
+    toast(`Registered ${n} opcodes for build ${build}. Load a .dat to use it.`);
+  }
+}
+
+$dev("dev-apply").addEventListener("click",applyDevMenu);
+$dev("dev-close").addEventListener("click",closeDevMenu);
+$dev("dev-cancel").addEventListener("click",closeDevMenu);
+$dev("dev-prefill").addEventListener("click",()=>{
+  $dev("dev-build").value=String(LATEST_GAME_BUILD);
+  $dev("dev-json").value=JSON.stringify(OPCODE_TABLES[LATEST_PATCH],null,0);
+});
+$dev("devmenu").addEventListener("click",e=>{ if(e.target===$dev("devmenu")) closeDevMenu(); });
+document.addEventListener("keydown",e=>{ if(e.key==="Escape" && !$dev("devmenu").classList.contains("hidden")) closeDevMenu(); });
+
 /* Public API — the shell loads the file and feeds both modules. */
 window.Inspector = { load: loadBytes };
 })();
