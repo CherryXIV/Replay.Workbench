@@ -627,8 +627,8 @@ function loadBytes(name, buffer){
       // waymark availability for the checkbox
       const hasWaymark = segs.some(s=>(s.opcode===WAYMARK_PRESET_OPCODE&&!isEmptyPreset(s))||s.opcode===WAYMARK_OPCODE);
       const wmCheck=document.getElementById("wm-check"), wm=document.getElementById("wm"), wmSub=document.getElementById("wm-sub");
-      if(hasWaymark){ wmCheck.classList.remove("disabled"); wm.disabled=false; wmSub.textContent="carry the latest placement into the pull"; }
-      else{ wmCheck.classList.add("disabled"); wm.checked=false; wm.disabled=true; wmSub.textContent="none captured in this recording"; }
+      if(hasWaymark){ wmCheck.classList.remove("disabled"); wm.disabled=false; wmSub.textContent="Carry the last waymarks into the pull"; }
+      else{ wmCheck.classList.add("disabled"); wm.checked=false; wm.disabled=true; wmSub.textContent="None captured in this file"; }
 
       // opcode transpose (which also re-stamps the build): only when we have a patch
       // table for this build and it isn't already the latest
@@ -637,13 +637,13 @@ function loadBytes(name, buffer){
             tSub=document.getElementById("transpose-sub");
       if(filePatch && filePatch!==LATEST_PATCH){
         tCheck.classList.remove("disabled"); tBox.disabled=false; tBox.checked=true;
-        tSub.textContent=`remap ${filePatch} → ${LATEST_PATCH} packets (also sets build)`;
+        tSub.textContent=`Remap ${filePatch} to ${LATEST_PATCH}`;
       } else if(filePatch===LATEST_PATCH){
         tCheck.classList.add("disabled"); tBox.checked=false; tBox.disabled=true;
-        tSub.textContent=`already on the latest patch (${LATEST_PATCH})`;
+        tSub.textContent=`Already on the latest patch (${LATEST_PATCH})`;
       } else {
         tCheck.classList.add("disabled"); tBox.checked=false; tBox.disabled=true;
-        tSub.textContent=`no opcode table for build ${curBuild} — add one to transpose`;
+        tSub.textContent=`No opcode table for build ${curBuild}? add one to transpose`;
       }
 
       renderHeader(); renderTimeline(); renderPullTable(); renderPlayers();
@@ -734,8 +734,13 @@ document.addEventListener("keydown",e=>{
 });
 
 const $dev=(id)=>document.getElementById(id);
+// Last build the user applied via the dev menu. Remembered so reopening the
+// menu shows what they entered, not the loaded file's embedded build.
+let devBuild="";
 function openDevMenu(){
-  if(fileBuild) $dev("dev-build").value=String(fileBuild);
+  // Prefer the last build the user applied; fall back to the loaded file's build.
+  if(devBuild) $dev("dev-build").value=devBuild;
+  else if(fileBuild) $dev("dev-build").value=String(fileBuild);
   devHint(DEV_HINT_DEFAULT,false);
   $dev("devmenu").classList.remove("hidden");
   $dev("dev-json").focus();
@@ -774,20 +779,28 @@ function applyDevMenu(){
   const table=normalizeOpcodeTable(parsed);
   if(!table){ devHint("Couldn't read an opcode table from that JSON (expected {name:opcode} or a FFXIVOpcodes opcodes.json).",true); return; }
 
-  const patchKey="custom-"+build;
+  const patchKey="Custom-"+build;
   OPCODE_TABLES[patchKey]=table;
   BUILD_TO_PATCH[build]=patchKey;
+  devBuild=buildRaw;
   const n=Object.keys(table).length;
+
+  // Promote this table to "latest" so transpose targets it and the build
+  // re-stamp uses it — Applying is the same as setting it as the latest patch.
+  LATEST_PATCH=patchKey; LATEST_GAME_BUILD=build;
   closeDevMenu();
 
   if(raw){
-    try{ loadBytes(fileName, raw.buffer.slice(0)); toast(`Registered ${n} opcodes for build ${build} — re-parsed ${fileName}.`); }
+    try{ loadBytes(fileName, raw.buffer.slice(0)); toast(`Registered ${n} opcodes for build ${build} (now latest) — re-parsed ${fileName}.`); }
     catch(err){ toast(err.message,true); }
   } else {
-    toast(`Registered ${n} opcodes for build ${build}. Load a .dat to use it.`);
+    toast(`Registered ${n} opcodes for build ${build} (now latest). Load a .dat to use it.`);
   }
 }
 
+// Wipe any values the browser restored from the previous session on reload —
+// the dev menu is meant to be ephemeral, gone on refresh.
+$dev("dev-build").value=""; $dev("dev-json").value="";
 $dev("dev-apply").addEventListener("click",applyDevMenu);
 $dev("dev-close").addEventListener("click",closeDevMenu);
 $dev("dev-cancel").addEventListener("click",closeDevMenu);

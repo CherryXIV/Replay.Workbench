@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Replay Workbench — A Realm Recorded .dat tool</title>
+<title>Replay Workbench - A .dat tool</title>
 <style>
   /* ---- design tokens ----
      Subject: a binary packet inspector for FFXIV duty recordings.
@@ -255,20 +255,20 @@
 <div class="wrap">
   <header class="app">
     <h1>Replay<span class="dot">.</span>Workbench</h1>
-    <span class="sub">FFXIV duty replay (.dat) toolkit</span>
+    <span class="sub">FFXIV duty recorder (.dat) toolkit</span>
     <nav class="tabs-nav">
       <button class="tabbtn cur" data-tab="editor">Editor</button>
       <button class="tabbtn" data-tab="playback">Playback</button>
     </nav>
   </header>
-  <p class="tagline">Open an "A Realm Recorded" recording to inspect its header, rename players, and
-    export a single pull — or switch to <b style="color:var(--phosphor)">Playback</b> to scrub through
-    where every actor stood. Everything runs in your browser; your file never leaves your machine.</p>
+  <p class="tagline">Open an "A Realm Recorded" recordings to inspect it's header, rename players, and
+    export a single pull, or switch to <b style="color:var(--phosphor)">Playback</b> to scrub through
+    where every actor stood. Everything runs in your browser. Your file never leaves your machine.</p>
 
   <!-- shared drop zone -->
   <label class="drop" id="drop" for="file">
-    <div class="big">Drop a <b style="color:var(--phosphor)">.dat</b> here, or click to browse</div>
-    <div class="small">loaded once, shared by both tabs</div>
+    <div class="big">Drop a <b style="color:var(--phosphor)">.dat</b> here, or click to browse.</div>
+    <div class="small">Shared between both tabs</div>
     <input type="file" id="file" accept=".dat">
   </label>
 
@@ -278,19 +278,19 @@
     <div id="tab-editor">
       <!-- header readout -->
       <section class="panel hidden" id="p-header">
-        <div class="head"><h2>Recording header</h2><span class="meta" id="h-file">—</span></div>
+        <div class="head"><h2>Recording Header</h2><span class="meta" id="h-file">—</span></div>
         <div class="readout" id="readout"></div>
       </section>
 
       <!-- timeline -->
       <section class="panel hidden" id="p-timeline">
-        <div class="head"><h2>Pull timeline</h2><span class="meta" id="t-count">—</span></div>
+        <div class="head"><h2>Pull Timeline</h2><span class="meta" id="t-count">—</span></div>
         <div class="timeline-wrap">
           <div class="tl-axis" id="tlaxis"></div>
           <div class="tl-legend">
-            <span><span class="sw" style="background:var(--phosphor)"></span>selected pull</span>
-            <span><span class="sw" style="background:var(--phosphor-deep)"></span>pull (wipe segment)</span>
-            <span><span class="sw" style="background:var(--violet)"></span>waymark placement</span>
+            <span><span class="sw" style="background:var(--phosphor)"></span>Selected Pull</span>
+            <span><span class="sw" style="background:var(--phosphor-deep)"></span>Pull (Wipe Segment)</span>
+            <span><span class="sw" style="background:var(--violet)"></span>Waymark Placement</span>
           </div>
         </div>
       </section>
@@ -315,38 +315,38 @@
           </span></div>
         <div class="body">
           <div class="players" id="players"></div>
-          <div class="hint">Edit a name and it's rewritten everywhere it appears — and reflected live on the Playback map. Names are limited to 31 bytes. The <span style="color:var(--amber)">amber</span> player is the recorder.</div>
+          <div class="hint">Edit a name and it's rewritten everywhere it appears, and is reflected live on the Playback map. Names are limited to 31 bytes. The <span style="color:var(--amber)">amber</span> player is the recorder.</div>
         </div>
       </section>
 
       <!-- controls -->
       <section class="panel hidden" id="p-controls">
-        <div class="head"><h2>Export</h2><span class="meta">single pull → .dat</span></div>
+        <div class="head"><h2>Export</h2><span class="meta">Single pull → .dat</span></div>
         <div class="body">
           <div class="controls">
             <label class="check" id="wm-check">
               <input type="checkbox" id="wm" checked>
               <span class="box"></span>
               <span class="lbl">Re-apply waymarks
-                <small id="wm-sub">carry the latest placement into the pull</small></span>
+                <small id="wm-sub">Carry the last waymarks into the pull</small></span>
             </label>
             <label class="check" id="names-check">
               <input type="checkbox" id="applynames" checked>
               <span class="box"></span>
               <span class="lbl">Apply name edits
-                <small>use the names above in the exported file</small></span>
+                <small>Use the names above in the exported file</small></span>
             </label>
             <label class="check" id="cd-check">
               <input type="checkbox" id="keepcd" checked>
               <span class="box"></span>
               <span class="lbl">Keep countdown
-                <small>add a selectable chapter at the engage</small></span>
+                <small>Add a selectable chapter at the engage</small></span>
             </label>
             <label class="check disabled" id="transpose-check">
               <input type="checkbox" id="transpose" disabled>
               <span class="box"></span>
-              <span class="lbl">Transpose opcodes → latest
-                <small id="transpose-sub">remap packets so the current client reads them</small></span>
+              <span class="lbl">Transpose opcodes to latest
+                <small id="transpose-sub">Remap packets so the current client reads them</small></span>
             </label>
             <div class="spacer"></div>
             <button class="ghost" id="btn-names" title="Save the whole recording with edited names, nothing split">Export renamed full file</button>
@@ -361,7 +361,7 @@
     <div id="tab-playback" class="hidden">
       <section class="panel" id="viewer">
         <div class="head">
-          <h2>Map playback</h2>
+          <h2>Map Playback</h2>
           <span class="meta" id="meta">—</span>
         </div>
         <div style="padding:12px 16px 0">
@@ -387,11 +387,11 @@
           </span>
         </div>
         <div class="opts">
-          <label class="opt"><input type="checkbox" id="chk-trail" checked> motion trails</label>
-          <label class="opt"><input type="checkbox" id="chk-cast" checked> cast pulses</label>
-          <label class="opt"><input type="checkbox" id="chk-waymark" checked> waymarks</label>
-          <label class="opt"><input type="checkbox" id="chk-npc"> show NPCs / unnamed actors</label>
-          <span style="color:var(--ink-faint)">scroll = zoom · drag = pan · dbl-click = reset · space = play · ←/→ = step</span>
+          <label class="opt"><input type="checkbox" id="chk-trail" checked> Motion Trails</label>
+          <label class="opt"><input type="checkbox" id="chk-cast" checked> Cast Pulses</label>
+          <label class="opt"><input type="checkbox" id="chk-waymark" checked> Waymarks</label>
+          <label class="opt"><input type="checkbox" id="chk-npc"> Show NPCs / Unnamed Actors</label>
+          <span style="color:var(--ink-faint)">Scroll = Zoom · Drag = Pan · dbl-click = Reset · Space = Play · ←/→ = Step</span>
         </div>
       </section>
       <p class="hint">Named dots are players (renaming them in the Editor updates them here); the amber ring marks the recorder.
@@ -401,7 +401,7 @@
   </div>
 
   <footer>
-    <div><b>replay.workbench</b> · client-side only · no upload</div>
+    <div><b>replay.workbench</b> · web based editor</div>
     <div>pull splitting &amp; player editing · positional playback from movement packets</div>
   </footer>
 </div>
@@ -419,7 +419,7 @@
       <label class="dev-lbl" for="dev-json">Opcodes JSON
         <a class="dev-src" href="https://raw.githubusercontent.com/karashiiro/FFXIVOpcodes/refs/heads/master/opcodes.json" target="_blank" rel="noopener noreferrer">karashiiro/FFXIVOpcodes opcodes.json ↗</a>
       </label>
-      <textarea id="dev-json" spellcheck="false" placeholder='{ "ActorCast":457, "ActorControl":415, "NpcSpawn":888, … }
+      <textarea id="dev-json" spellcheck="false" autocomplete="off" placeholder='{ "ActorCast":457, "ActorControl":415, "NpcSpawn":888, … }
 
 — or paste a full FFXIVOpcodes opcodes.json (Global ServerZoneIpcType is used)'></textarea>
       <div class="dev-hint" id="dev-hint"></div>
