@@ -153,8 +153,16 @@
   .check .lbl{font-size:13px;color:var(--ink)}
   .check .lbl small{display:block;color:var(--ink-dim);font-size:11px}
   .check.disabled{opacity:.45;cursor:not-allowed}
+  .anon-race{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--ink);cursor:pointer;user-select:none}
+  .anon-race select{background:var(--panel-2);border:1px solid var(--line);border-radius:4px;
+    color:var(--ink);font-family:var(--mono);font-size:12px;padding:5px 8px;cursor:pointer}
+  .anon-race select:focus{outline:none;border-color:var(--phosphor)}
+  .anon-race.disabled{opacity:.45;cursor:not-allowed}
+  .anon-race.disabled select{cursor:not-allowed}
 
   .spacer{flex:1}
+  /* both export buttons share a full-width bottom row, primary first */
+  .export-actions{display:flex;align-items:center;gap:14px;flex-basis:100%;margin-top:4px}
   button.act{
     font-family:var(--mono);font-size:13px;font-weight:500;
     background:var(--phosphor);color:#05201e;border:none;border-radius:var(--radius);
@@ -348,9 +356,34 @@
               <span class="lbl">Transpose opcodes to latest
                 <small id="transpose-sub">Remap packets so the current client reads them</small></span>
             </label>
-            <div class="spacer"></div>
-            <button class="ghost" id="btn-names" title="Save the whole recording with edited names, nothing split">Export renamed full file</button>
-            <button class="act" id="btn-split" disabled>Export selected pull</button>
+            <label class="check disabled" id="anon-check">
+              <input type="checkbox" id="anon-appear" disabled>
+              <span class="box"></span>
+              <span class="lbl">Anonymize players
+                <small id="anon-sub">Replace names, race, gear &amp; weapons so no one is identifiable</small></span>
+            </label>
+            <label class="anon-race disabled" id="anon-race-wrap">Race
+              <select id="anon-race" disabled>
+                <option value="1" selected>Hyur</option>
+                <option value="2">Elezen</option>
+                <option value="3">Lalafell</option>
+                <option value="4">Miqo'te</option>
+                <option value="5">Roegadyn</option>
+                <option value="6">Au Ra</option>
+                <option value="7">Hrothgar</option>
+                <option value="8">Viera</option>
+              </select>
+            </label>
+            <label class="check disabled" id="strip-portrait-check">
+              <input type="checkbox" id="strip-portrait" disabled>
+              <span class="box"></span>
+              <span class="lbl">Strip party portraits
+                <small id="strip-portrait-sub">Remove the PartyPortraitInfo packets entirely</small></span>
+            </label>
+            <div class="export-actions">
+              <button class="act" id="btn-split" disabled>Export selected pull</button>
+              <button class="ghost" id="btn-names" title="Save the whole recording with edited names, nothing split">Export renamed full file</button>
+            </div>
           </div>
           <div class="hint" id="export-hint">Select a pull from the timeline or table to enable export.</div>
         </div>
@@ -436,6 +469,7 @@
 <div id="toast"></div>
 
 <script src="opcodes.js"></script>
+<script src="afgear.js"></script>
 <script src="app.js"></script>
 <script src="timeline.js"></script>
 <script src="shell.js"></script>
