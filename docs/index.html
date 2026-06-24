@@ -59,6 +59,9 @@
     border:1px solid var(--line);border-radius:var(--radius);padding:6px 14px;cursor:pointer;transition:all .12s}
   .tabbtn:hover{color:var(--ink);border-color:var(--ink-faint)}
   .tabbtn.cur{color:var(--phosphor);border-color:var(--phosphor-deep);background:rgba(57,212,200,.06)}
+  .tablink{font-family:var(--mono);font-size:12px;color:var(--ink-dim);background:transparent;text-decoration:none;
+    border:1px solid var(--line);border-radius:var(--radius);padding:6px 14px;cursor:pointer;transition:all .12s}
+  .tablink:hover{color:var(--ink);border-color:var(--ink-faint)}
 
   /* ---- drop zone ---- */
   .drop{
@@ -434,7 +437,7 @@
   </div>
 
   <footer>
-    <div><b>replay.workbench</b> · web based editor</div>
+    <div><b>replay.workbench</b> · web based editor · <a href="opcodeinspector.html" style="color:var(--phosphor);text-decoration:none">opcode editor</a></div>
     <div>pull splitting &amp; player editing · positional playback from movement packets</div>
   </footer>
 </div>

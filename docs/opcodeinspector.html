@@ -1,0 +1,717 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Opcode Inspector - Replay Workbench</title>
+<style>
+  /* ---- design tokens (shared with the main workbench) ----
+     Subject: a raw packet sniffer for FFXIV duty recordings (.dat).
+     Direction: instrument panel. Dark slate, phosphor-cyan readouts, amber for
+     the things that need a human's attention (unidentified / custom opcodes).
+     Monospace data, one humanist sans for chrome. */
+  :root{
+    --bg:#0d1117;
+    --panel:#141b24;
+    --panel-2:#1b2531;
+    --line:#263344;
+    --ink:#d6e2f0;
+    --ink-dim:#7d8da0;
+    --ink-faint:#4d5a6b;
+    --phosphor:#39d4c8;       /* primary readout */
+    --phosphor-deep:#1c6f6a;
+    --amber:#f2b84c;          /* unidentified / custom opcodes */
+    --violet:#8b7cf6;         /* name hits */
+    --danger:#e8654f;
+    --radius:6px;
+    --mono:"JetBrains Mono",ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+    --sans:"Inter",-apple-system,system-ui,sans-serif;
+  }
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap');
+
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{
+    background:var(--bg);color:var(--ink);font-family:var(--sans);
+    font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased;
+    background-image:radial-gradient(circle at 50% -10%, rgba(57,212,200,.05), transparent 60%);
+  }
+  .wrap{max-width:1100px;margin:0 auto;padding:32px 24px 80px}
+
+  /* ---- header ---- */
+  header.app{display:flex;align-items:baseline;gap:16px;flex-wrap:wrap;margin-bottom:6px}
+  header.app h1{font-family:var(--mono);font-weight:700;font-size:20px;letter-spacing:-.01em;color:var(--ink)}
+  header.app h1 .dot{color:var(--phosphor)}
+  header.app .sub{font-family:var(--mono);font-size:12px;color:var(--ink-dim)}
+  .tabs-nav{margin-left:auto;display:flex;gap:8px}
+  .tablink{font-family:var(--mono);font-size:12px;color:var(--ink-dim);background:transparent;text-decoration:none;
+    border:1px solid var(--line);border-radius:var(--radius);padding:6px 14px;cursor:pointer;transition:all .12s}
+  .tablink:hover{color:var(--ink);border-color:var(--ink-faint)}
+  .tablink.cur{color:var(--phosphor);border-color:var(--phosphor-deep);background:rgba(57,212,200,.06)}
+  .tagline{color:var(--ink-dim);font-size:13px;margin-bottom:22px;max-width:72ch}
+  .tagline b{color:var(--phosphor);font-weight:500}
+
+  /* ---- drop zone ---- */
+  .drop{display:block;border:1px dashed var(--line);border-radius:var(--radius);
+    background:linear-gradient(180deg,var(--panel),transparent);
+    padding:48px 24px;text-align:center;cursor:pointer;transition:border-color .15s,background .15s,padding .15s}
+  .drop:hover,.drop.over{border-color:var(--phosphor);background:rgba(57,212,200,.04)}
+  .drop.compact{padding:14px 24px}
+  .drop .big{font-family:var(--mono);font-size:15px;color:var(--ink);margin-bottom:6px}
+  .drop.compact .big{font-size:12px;margin:0}
+  .drop .small{font-size:12px;color:var(--ink-dim)}
+  .drop .small b{color:var(--phosphor);font-weight:500}
+  input[type=file]{display:none}
+
+  /* ---- panels ---- */
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);margin-top:20px;overflow:hidden}
+  .panel > .head{display:flex;align-items:center;justify-content:space-between;gap:12px;
+    padding:12px 16px;border-bottom:1px solid var(--line);background:var(--panel-2);flex-wrap:wrap}
+  .panel > .head h2{font-family:var(--mono);font-size:12px;font-weight:500;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-dim)}
+  .panel > .head .meta{font-family:var(--mono);font-size:12px;color:var(--phosphor)}
+  .panel > .body{padding:16px}
+
+  /* ---- header readout grid ---- */
+  .readout{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:1px;background:var(--line)}
+  .readout .cell{background:var(--panel);padding:12px 14px}
+  .readout .k{font-family:var(--mono);font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-faint);margin-bottom:4px}
+  .readout .v{font-family:var(--mono);font-size:14px;color:var(--ink);word-break:break-all}
+  .readout .v.cyan{color:var(--phosphor)}
+  .readout .v.amber{color:var(--amber)}
+
+  /* ---- finder cards ---- */
+  .finder{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media(max-width:680px){.finder{grid-template-columns:1fr}}
+  .fcard{background:var(--panel-2);border:1px solid var(--line);border-radius:var(--radius);padding:14px 16px}
+  .fcard h3{font-family:var(--mono);font-size:13px;color:var(--ink);margin-bottom:2px}
+  .fcard .desc{font-size:12px;color:var(--ink-dim);margin-bottom:12px;line-height:1.45}
+  .fcard.hit{border-color:var(--phosphor-deep);box-shadow:inset 0 0 0 1px rgba(57,212,200,.12)}
+  .fbig{font-family:var(--mono);font-size:30px;font-weight:700;color:var(--phosphor);line-height:1.1}
+  .fbig.none{color:var(--ink-faint);font-size:18px;font-weight:500}
+  .fhex{font-family:var(--mono);font-size:12px;color:var(--ink-dim);margin-top:2px}
+  .fwhy{font-family:var(--mono);font-size:11px;color:var(--ink-dim);margin-top:10px;line-height:1.5}
+  .fwhy .ok{color:var(--phosphor)}
+  .fwhy .warn{color:var(--amber)}
+  .copybtn{font-family:var(--mono);font-size:11px;background:transparent;color:var(--ink-dim);
+    border:1px solid var(--line);border-radius:4px;padding:3px 9px;cursor:pointer;margin-left:8px;vertical-align:2px}
+  .copybtn:hover{color:var(--phosphor);border-color:var(--phosphor-deep)}
+  .alt{font-family:var(--mono);font-size:11px;color:var(--ink-faint);margin-top:10px}
+  .alt b{color:var(--ink-dim);font-weight:500}
+  .alt .pick{color:var(--amber);cursor:pointer;text-decoration:underline dotted}
+  .alt .pick:hover{color:var(--phosphor)}
+
+  /* ---- name-table control row ---- */
+  .ctlrow{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+  .ctlrow label{font-family:var(--mono);font-size:11px;color:var(--ink-faint);text-transform:uppercase;letter-spacing:.06em}
+  select,.tinput{font-family:var(--mono);font-size:12px;background:var(--bg);border:1px solid var(--line);
+    border-radius:4px;color:var(--ink);padding:6px 8px}
+  select:focus,.tinput:focus{outline:none;border-color:var(--phosphor)}
+  .tinput{flex:1;min-width:140px}
+  button.ghost{font-family:var(--mono);font-size:12px;background:transparent;color:var(--ink-dim);
+    border:1px solid var(--line);border-radius:var(--radius);padding:6px 12px;cursor:pointer}
+  button.ghost:hover{color:var(--ink);border-color:var(--ink-faint)}
+
+  /* ---- census table ---- */
+  .toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:10px 16px;border-bottom:1px solid var(--line);background:var(--panel-2)}
+  .toolbar .grow{flex:1}
+  .chk{display:flex;align-items:center;gap:6px;font-family:var(--mono);font-size:11px;color:var(--ink-dim);cursor:pointer;user-select:none}
+  .chk input{accent-color:var(--phosphor);width:13px;height:13px}
+  table.opc{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:12.5px}
+  table.opc th{text-align:left;font-weight:500;font-size:10px;letter-spacing:.07em;text-transform:uppercase;
+    color:var(--ink-faint);padding:8px 12px;border-bottom:1px solid var(--line);cursor:pointer;white-space:nowrap}
+  table.opc th:hover{color:var(--ink-dim)}
+  table.opc th .ar{color:var(--phosphor)}
+  table.opc td{padding:7px 12px;border-bottom:1px solid var(--panel-2);color:var(--ink);white-space:nowrap}
+  table.opc tr{cursor:pointer}
+  table.opc tr:hover td{background:var(--panel-2)}
+  table.opc tr.sel td{background:rgba(57,212,200,.08)}
+  table.opc tr.sel td:first-child{box-shadow:inset 3px 0 0 var(--phosphor)}
+  .dec{color:var(--phosphor)}
+  .dim{color:var(--ink-dim)}
+  .nm{color:var(--ink)}
+  .nm.unk{color:var(--amber)}
+  .tag{display:inline-block;font-size:9px;letter-spacing:.05em;text-transform:uppercase;
+    border:1px solid var(--phosphor-deep);color:var(--phosphor);border-radius:3px;padding:1px 5px;margin-left:6px}
+  .tag.party{border-color:var(--violet);color:var(--violet)}
+  .scrollx{overflow-x:auto}
+  .scrolly{max-height:420px;overflow-y:auto}
+
+  /* ---- hex inspector ---- */
+  .insp-head{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:12px;font-family:var(--mono);font-size:12px;color:var(--ink-dim)}
+  .insp-head b{color:var(--phosphor);font-weight:500}
+  .pktnav{display:flex;align-items:center;gap:8px}
+  .pktnav button{font-family:var(--mono);font-size:12px;background:var(--panel-2);color:var(--ink);
+    border:1px solid var(--line);border-radius:4px;padding:4px 10px;cursor:pointer}
+  .pktnav button:hover{border-color:var(--phosphor-deep)}
+  .pktnav button:disabled{color:var(--ink-faint);cursor:not-allowed;opacity:.5}
+  .seghdr{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:1px;background:var(--line);margin-bottom:12px;border:1px solid var(--line)}
+  .seghdr .c{background:var(--panel);padding:8px 10px}
+  .seghdr .c .k{font-family:var(--mono);font-size:9px;letter-spacing:.07em;text-transform:uppercase;color:var(--ink-faint)}
+  .seghdr .c .v{font-family:var(--mono);font-size:13px;color:var(--ink)}
+  pre.hex{font-family:var(--mono);font-size:12px;line-height:1.55;color:var(--ink);background:var(--bg);
+    border:1px solid var(--line);border-radius:4px;padding:12px;overflow-x:auto;max-height:360px;overflow-y:auto;white-space:pre}
+  pre.hex .off{color:var(--ink-faint)}
+  pre.hex .as{color:var(--ink-dim)}
+  pre.hex mark{background:rgba(139,124,246,.25);color:var(--violet);border-radius:2px}
+
+  .hint{font-family:var(--mono);font-size:11px;color:var(--ink-dim);padding:12px 16px}
+  .hidden{display:none !important}
+
+  #toast{position:fixed;left:50%;bottom:28px;transform:translateX(-50%) translateY(20px);
+    background:var(--panel-2);border:1px solid var(--phosphor);color:var(--ink);
+    font-family:var(--mono);font-size:13px;padding:12px 18px;border-radius:var(--radius);
+    opacity:0;pointer-events:none;transition:all .2s;z-index:50;max-width:90vw}
+  #toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+  #toast.err{border-color:var(--danger)}
+
+  footer{margin-top:40px;font-family:var(--mono);font-size:11px;color:var(--ink-faint);text-align:center;line-height:1.8}
+  footer b{color:var(--ink-dim);font-weight:500}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="app">
+    <h1>Opcode<span class="dot">.</span>Inspector</h1>
+    <span class="sub">FFXIV .dat packet sniffer</span>
+  </header>
+  <p class="tagline">Drop a recording to read every <b>server-zone IPC packet</b> it contains — opcode, size,
+    timing and a raw hex view of the bytes. Built to hunt down the two opcodes the workbench has to hand-enter
+    each patch: <b>PartyList</b> and <b>PartyPortraitInfo</b>. Everything runs in your browser; the file never leaves your machine.</p>
+
+  <label class="drop" id="drop" for="file">
+    <div class="big">Drop a <b style="color:var(--phosphor)">.dat</b> here, or click to browse.</div>
+    <div class="small">An "A Realm Recorded" duty recording</div>
+    <input type="file" id="file" accept=".dat">
+  </label>
+
+  <!-- header readout -->
+  <section class="panel hidden" id="p-header">
+    <div class="head"><h2>Recording Header</h2><span class="meta" id="h-file">—</span></div>
+    <div class="readout" id="readout"></div>
+  </section>
+
+  <!-- custom opcode finder -->
+  <section class="panel hidden" id="p-finder">
+    <div class="head">
+      <h2>Custom Opcode Finder</h2>
+      <span class="meta" id="finder-meta">—</span>
+    </div>
+    <div class="body">
+      <p class="tagline" style="margin:0 0 14px">Both packets carry your party members' <b>names</b> as text, so the
+        finder first reads the names out of the recording, then flags the opcodes whose payloads contain them.
+        <b>PartyPortraitInfo</b> is the 1408&#8209;byte (8&times;176) appearance packet; <b>PartyList</b> is the smaller
+        roster packet. Confirm a guess by clicking it — the hex view highlights the names in the bytes.</p>
+      <div class="finder" id="finder-cards"></div>
+      <div class="alt" id="finder-alt"></div>
+    </div>
+  </section>
+
+  <!-- opcode census -->
+  <section class="panel hidden" id="p-census">
+    <div class="head">
+      <h2>Opcode Census</h2>
+      <span class="meta" id="census-meta">—</span>
+    </div>
+    <div class="toolbar">
+      <span class="ctlrow">
+        <label for="nametable">Name table</label>
+        <select id="nametable"></select>
+      </span>
+      <input class="tinput" id="search" type="text" placeholder="filter by opcode (dec/0xhex) or name…" autocomplete="off">
+      <span class="grow"></span>
+      <label class="chk"><input type="checkbox" id="only-unknown"> Unidentified only</label>
+      <label class="chk"><input type="checkbox" id="only-names"> Contains names only</label>
+    </div>
+    <div class="scrollx scrolly">
+      <table class="opc">
+        <thead><tr id="opc-head"></tr></thead>
+        <tbody id="opc-body"></tbody>
+      </table>
+    </div>
+    <div class="hint" id="census-hint"></div>
+  </section>
+
+  <!-- hex inspector -->
+  <section class="panel hidden" id="p-inspect">
+    <div class="head"><h2>Packet Inspector</h2><span class="meta" id="insp-meta">select an opcode</span></div>
+    <div class="body" id="insp-body">
+      <p class="dim" style="font-family:var(--mono);font-size:12px">Click any opcode in the census above to dump its packets.</p>
+    </div>
+  </section>
+
+  <footer>
+    <div><b>replay.workbench</b> · opcode inspector · <a href="index.html" style="color:var(--phosphor);text-decoration:none">replay editor</a></div>
+    <div>read-only · per-patch opcode names from karashiiro/FFXIVOpcodes</div>
+  </footer>
+</div>
+
+<div id="toast"></div>
+
+<script src="opcodes.js"></script>
+<script>
+"use strict";
+(function(){
+/* =====================================================================
+   FFXIVReplay .dat format constants (mirrors app.js)
+   ===================================================================== */
+const HEADER_SIZE=0x68, CHAPTER_ENTRY=0xC, MAX_CHAPTERS=64;
+const CHAPTER_ARRAY=0x4+CHAPTER_ENTRY*MAX_CHAPTERS;       // 0x304
+const DATA_START=HEADER_SIZE+CHAPTER_ARRAY;               // 0x36C
+const SEG_HEADER=12;
+const OFF_VERSION=0x0C, OFF_BUILD=0x10, OFF_TIMESTAMP=0x14, OFF_TOTAL_MS=0x18, OFF_REPLAY_LEN=0x48;
+const MAGIC=[70,70,88,73,86,82,69,80,76,65,89,0]; // "FFXIVREPLAY\0"
+const PORTRAIT_LEN=1408; // PartyPortraitInfo = 8 members * 176 bytes (see app.js anonymizer)
+
+/* ---- state ---- */
+let raw=null, dv=null, fileName="";
+let segs=[];                 // {offset,opcode,dataLength,ms,oid,payloadStart}
+let fileBuild=0, filePatch=null;
+let census=[];               // per-opcode aggregates (see buildCensus)
+let censusByOp=new Map();
+let partyNames=[];           // [{name, bytes:Uint8Array}]
+let nameTableMap=null;       // active opcode->name resolution (Map)
+let sortKey="count", sortDir=-1;
+let selectedOp=null, selectedPktIdx=0;
+
+const u16=(o)=>dv.getUint16(o,true);
+const u32=(o)=>dv.getUint32(o,true);
+const i32=(o)=>dv.getInt32(o,true);
+
+/* =====================================================================
+   Parse
+   ===================================================================== */
+function parse(buffer){
+  raw=new Uint8Array(buffer); dv=new DataView(raw.buffer);
+  for(let i=0;i<MAGIC.length;i++) if(raw[i]!==MAGIC[i]) throw new Error("Not an FFXIVREPLAY .dat (bad header).");
+  fileBuild=i32(OFF_BUILD);
+  filePatch=(typeof BUILD_TO_PATCH!=="undefined" && BUILD_TO_PATCH[fileBuild])||null;
+  const replayLength=i32(OFF_REPLAY_LEN);
+  segs=[]; let off=0;
+  while(off<replayLength){
+    const b=DATA_START+off;
+    const opcode=u16(b), dataLength=u16(b+2), ms=u32(b+4), oid=u32(b+8);
+    segs.push({offset:off,opcode,dataLength,ms,oid,payloadStart:b+SEG_HEADER});
+    off+=SEG_HEADER+dataLength;
+  }
+  partyNames=findPlayerNames(replayLength);
+  return {replayLength};
+}
+
+/* Scan the file for 32-byte null-padded "First Last" name fields, the same way
+   the workbench locates players. Returns the encoded bytes for payload matching. */
+function findPlayerNames(replayLength){
+  const isUpper=(b)=>b>=65&&b<=90;
+  const isNameChar=(b)=>(b>=65&&b<=90)||(b>=97&&b<=122)||(b>=48&&b<=57)||b===32||b===39||b===45;
+  const seen=new Map();
+  const end=DATA_START+replayLength;
+  for(let i=0;i+32<=end;i++){
+    if(!isUpper(raw[i])) continue;
+    let len=0; while(len<32 && isNameChar(raw[i+len])) len++;
+    if(len===0||len>31) continue;
+    let padded=true; for(let j=len;j<32;j++){ if(raw[i+j]!==0){ padded=false; break; } }
+    if(!padded) continue;
+    const s=new TextDecoder().decode(raw.subarray(i,i+len));
+    if(!looksLikeName(s)) continue;
+    if(!seen.has(s)) seen.set(s,new TextEncoder().encode(s));
+  }
+  return [...seen].map(([name,bytes])=>({name,bytes}));
+}
+function looksLikeName(s){
+  if(/^Player \d{1,3}$/.test(s)) return true;
+  const parts=s.split(" ");
+  if(parts.length!==2) return false;
+  for(const p of parts){
+    if(p.length<2||p.length>15) return false;
+    if(!(p[0]>="A"&&p[0]<="Z")) return false;
+    for(const c of p){ if(!/[A-Za-z'\-]/.test(c)) return false; }
+  }
+  return true;
+}
+
+/* find needle bytes within raw[a, b) — naive, needles are short */
+function bytesContain(a,b,needle){
+  const n=needle.length; if(n===0) return -1;
+  outer: for(let i=a;i+n<=b;i++){
+    for(let j=0;j<n;j++) if(raw[i+j]!==needle[j]) continue outer;
+    return i;
+  }
+  return -1;
+}
+
+/* =====================================================================
+   Census — aggregate every distinct opcode
+   ===================================================================== */
+function buildCensus(){
+  const m=new Map();
+  for(let idx=0;idx<segs.length;idx++){
+    const s=segs[idx];
+    let e=m.get(s.opcode);
+    if(!e){ e={op:s.opcode,count:0,bytes:0,lens:new Map(),firstMs:s.ms,lastMs:s.ms,idxs:[],names:new Set()};
+      m.set(s.opcode,e); }
+    e.count++; e.bytes+=s.dataLength;
+    e.lens.set(s.dataLength,(e.lens.get(s.dataLength)||0)+1);
+    if(s.ms<e.firstMs) e.firstMs=s.ms; if(s.ms>e.lastMs) e.lastMs=s.ms;
+    e.idxs.push(idx);
+  }
+  // which party names appear inside each opcode's payloads (only worth checking
+  // packets big enough to hold a name)
+  if(partyNames.length){
+    for(const e of m.values()){
+      for(const idx of e.idxs){
+        const s=segs[idx];
+        if(s.dataLength<2) continue;
+        const a=s.payloadStart, b=s.payloadStart+s.dataLength;
+        for(const pn of partyNames){
+          if(e.names.has(pn.name)) continue;
+          if(bytesContain(a,b,pn.bytes)>=0) e.names.add(pn.name);
+        }
+        if(e.names.size>=partyNames.length) break;
+      }
+    }
+  }
+  census=[...m.values()];
+  censusByOp=m;
+  // common (modal) length per opcode
+  for(const e of census){
+    let best=-1,bestN=-1; for(const [L,n] of e.lens){ if(n>bestN){ bestN=n; best=L; } }
+    e.modalLen=best;
+  }
+}
+
+/* =====================================================================
+   Name resolution table (built-in patches + custom paste)
+   ===================================================================== */
+let customTable=null;
+function buildNameTableOptions(){
+  const sel=document.getElementById("nametable");
+  sel.innerHTML="";
+  const opt=(v,t)=>{ const o=document.createElement("option"); o.value=v; o.textContent=t; sel.appendChild(o); };
+  const auto=filePatch?`Auto — build ${fileBuild} (${filePatch})`:`Auto — build ${fileBuild} (no table)`;
+  opt("auto",auto);
+  if(typeof OPCODE_TABLES!=="undefined") for(const p of Object.keys(OPCODE_TABLES)) opt("patch:"+p,"Patch "+p);
+  opt("paste","Paste a table…");
+  opt("none","None (raw opcodes)");
+  sel.value="auto";
+}
+function activeTableObj(){
+  const v=document.getElementById("nametable").value;
+  if(v==="none") return null;
+  if(v==="paste") return customTable;
+  if(v==="auto") return (filePatch && typeof OPCODE_TABLES!=="undefined")?OPCODE_TABLES[filePatch]:null;
+  if(v.startsWith("patch:")) return OPCODE_TABLES[v.slice(6)];
+  return null;
+}
+function rebuildNameMap(){
+  const t=activeTableObj();
+  nameTableMap=new Map();
+  if(t) for(const name in t) nameTableMap.set(t[name],name);
+}
+function nameFor(op){ return nameTableMap.get(op)||null; }
+
+/* =====================================================================
+   The finder — best guesses for PartyList & PartyPortraitInfo
+   ===================================================================== */
+function guessPortrait(){
+  // strongest signal: a packet that is consistently 1408 bytes AND carries names
+  const cands=census.filter(e=>e.lens.has(PORTRAIT_LEN));
+  cands.sort((a,b)=>(b.names.size-a.names.size)||(b.count-a.count));
+  return cands;
+}
+function guessPartyList(){
+  // packets that carry >=2 party names but are NOT the 1408-byte portrait packet,
+  // ranked by how many distinct names they hold then by rarity (the roster is
+  // pushed on party/zone changes, not every frame)
+  const cands=census.filter(e=>e.names.size>=2 && !e.lens.has(PORTRAIT_LEN));
+  cands.sort((a,b)=>(b.names.size-a.names.size)||(a.count-b.count));
+  return cands;
+}
+
+/* =====================================================================
+   Render
+   ===================================================================== */
+function fmtClock(ms){
+  let s=Math.floor(ms/1000); const m=Math.floor(s/60); s%=60;
+  return `${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`;
+}
+function hx(op){ return "0x"+op.toString(16).toUpperCase().padStart(4,"0"); }
+function fmtBytes(n){ return n<1024?`${n} B`:n<1048576?`${(n/1024).toFixed(0)} KB`:`${(n/1048576).toFixed(1)} MB`; }
+
+function renderHeader(){
+  const ts=u32(OFF_TIMESTAMP);
+  const known = filePatch ? `${fileBuild} (${filePatch})` : `${fileBuild} (unknown)`;
+  const cells=[
+    ["format version",u16(OFF_VERSION),""],
+    ["game build",known,filePatch?"cyan":"amber"],
+    ["recorded",new Date(ts*1000).toISOString().replace("T"," ").replace(/\..+/,"")+" UTC","cyan"],
+    ["total length",fmtClock(u32(OFF_TOTAL_MS)),"cyan"],
+    ["replay length",fmtBytes(i32(OFF_REPLAY_LEN)),""],
+    ["packets",segs.length.toLocaleString(),""],
+    ["distinct opcodes",census.length.toLocaleString(),""],
+    ["party names read",partyNames.length?partyNames.length+" found":"none","amber"],
+  ];
+  document.getElementById("readout").innerHTML=cells.map(([k,v,c])=>
+    `<div class="cell"><div class="k">${k}</div><div class="v ${c}">${esc(v)}</div></div>`).join("");
+  document.getElementById("h-file").textContent=fileName;
+}
+
+function finderCard(title,desc,cands,isPortrait){
+  const top=cands[0];
+  if(!top){
+    return `<div class="fcard"><h3>${title}</h3><div class="desc">${desc}</div>
+      <div class="fbig none">No candidate found</div>
+      <div class="fwhy"><span class="warn">No packet in this recording matched the signature.</span>
+      ${partyNames.length?"":" The finder needs party names — none were read from this file."}</div></div>`;
+  }
+  const named=nameFor(top.op);
+  const why=[];
+  if(isPortrait) why.push(`<span class="ok">✓ 1408-byte appearance packet</span>`);
+  why.push(top.names.size?`<span class="ok">✓ holds ${top.names.size} party name${top.names.size>1?"s":""}</span>`:`<span class="warn">no names matched</span>`);
+  why.push(`appears <b style="color:var(--ink-dim)">${top.count}×</b>`);
+  if(named) why.push(named===title?`<span class="ok">✓ matches the loaded table</span>`:`table calls it <b style="color:var(--ink-dim)">${esc(named)}</b>`);
+  return `<div class="fcard hit"><h3>${title}</h3><div class="desc">${desc}</div>
+    <div class="fbig">${top.op}<button class="copybtn" data-copy="${top.op}">copy</button></div>
+    <div class="fhex">${hx(top.op)} · modal size ${top.modalLen} B</div>
+    <div class="fwhy">${why.join(" &nbsp;·&nbsp; ")}</div>
+    <div style="margin-top:10px"><button class="ghost" data-open="${top.op}">Inspect bytes →</button></div></div>`;
+}
+
+function renderFinder(){
+  const portraits=guessPortrait(), lists=guessPartyList();
+  document.getElementById("finder-cards").innerHTML=
+    finderCard("PartyPortraitInfo","The party-member portraits — race, gear and weapons for up to 8 members.",portraits,true)+
+    finderCard("PartyList","The party roster UI — names, jobs and levels of the members.",lists,false);
+
+  // runner-up candidates the user can jump to
+  const altParts=[];
+  if(portraits.length>1) altParts.push(`<div><b>Other portrait-size opcodes:</b> ${portraits.slice(1,5).map(e=>`<span class="pick" data-open="${e.op}">${e.op}</span>`).join(", ")}</div>`);
+  if(lists.length>1) altParts.push(`<div><b>Other name-bearing opcodes:</b> ${lists.slice(1,6).map(e=>`<span class="pick" data-open="${e.op}">${e.op} <span style="color:var(--ink-faint)">(${e.names.size}n)</span></span>`).join(", ")}</div>`);
+  if(filePatch && typeof OPCODE_TABLES!=="undefined"){
+    const t=OPCODE_TABLES[filePatch];
+    altParts.push(`<div style="margin-top:6px;color:var(--ink-faint)">This build's table already records PartyList=<b style="color:var(--ink-dim)">${t.PartyList}</b>, PartyPortraitInfo=<b style="color:var(--ink-dim)">${t.PartyPortraitInfo}</b> — use the finder to verify them on a fresh patch.</div>`);
+  }
+  document.getElementById("finder-alt").innerHTML=altParts.join("");
+
+  const meta=partyNames.length?`${partyNames.length} names: ${partyNames.slice(0,4).map(n=>esc(n.name)).join(", ")}${partyNames.length>4?"…":""}`:"no party names read";
+  document.getElementById("finder-meta").textContent=meta;
+}
+
+const COLS=[
+  {k:"op",label:"opcode",get:e=>e.op,cell:e=>{
+    const nm=nameFor(e.op); const tags=[];
+    if(isPortraitCand(e)) tags.push('<span class="tag party">portrait?</span>');
+    else if(e.names.size>=2) tags.push('<span class="tag party">names</span>');
+    return `<span class="dec">${e.op}</span> <span class="dim">${hx(e.op)}</span>${tags.join("")}`;
+  }},
+  {k:"name",label:"resolved name",get:e=>nameFor(e.op)||"~",cell:e=>{
+    const nm=nameFor(e.op); return nm?`<span class="nm">${esc(nm)}</span>`:`<span class="nm unk">unidentified</span>`;
+  }},
+  {k:"count",label:"packets",get:e=>e.count,cell:e=>`<span class="dec">${e.count.toLocaleString()}</span>`},
+  {k:"modalLen",label:"size",get:e=>e.modalLen,cell:e=>{
+    const multi=e.lens.size>1?`<span class="dim"> (${e.lens.size} sizes)</span>`:"";
+    return `${e.modalLen} B${multi}`;
+  }},
+  {k:"names",label:"names",get:e=>e.names.size,cell:e=>e.names.size?`<span style="color:var(--violet)">${e.names.size}</span>`:`<span class="dim">—</span>`},
+  {k:"firstMs",label:"first",get:e=>e.firstMs,cell:e=>`<span class="dim">${fmtClock(e.firstMs)}</span>`},
+  {k:"lastMs",label:"last",get:e=>e.lastMs,cell:e=>`<span class="dim">${fmtClock(e.lastMs)}</span>`},
+];
+function isPortraitCand(e){ return e.lens.has(PORTRAIT_LEN); }
+
+function renderCensusHead(){
+  document.getElementById("opc-head").innerHTML=COLS.map(c=>{
+    const ar=sortKey===c.k?`<span class="ar">${sortDir<0?"▼":"▲"}</span>`:"";
+    return `<th data-k="${c.k}">${c.label} ${ar}</th>`;
+  }).join("");
+}
+function renderCensusBody(){
+  const q=document.getElementById("search").value.trim().toLowerCase();
+  const onlyUnknown=document.getElementById("only-unknown").checked;
+  const onlyNames=document.getElementById("only-names").checked;
+  let rows=census.slice();
+  if(onlyUnknown) rows=rows.filter(e=>!nameFor(e.op));
+  if(onlyNames) rows=rows.filter(e=>e.names.size>0);
+  if(q) rows=rows.filter(e=>{
+    const nm=(nameFor(e.op)||"").toLowerCase();
+    return String(e.op).includes(q)||hx(e.op).toLowerCase().includes(q)||nm.includes(q);
+  });
+  const col=COLS.find(c=>c.k===sortKey)||COLS[2];
+  rows.sort((a,b)=>{ const x=col.get(a),y=col.get(b);
+    if(typeof x==="number") return (x-y)*sortDir;
+    return String(x).localeCompare(String(y))*sortDir; });
+  document.getElementById("opc-body").innerHTML=rows.map(e=>
+    `<tr data-op="${e.op}"${e.op===selectedOp?' class="sel"':""}>${COLS.map(c=>`<td>${c.cell(e)}</td>`).join("")}</tr>`).join("");
+  document.getElementById("census-meta").textContent=`${rows.length} / ${census.length} opcodes · ${segs.length.toLocaleString()} packets`;
+  const unk=census.filter(e=>!nameFor(e.op)).length;
+  document.getElementById("census-hint").textContent=`${unk} opcode${unk!==1?"s":""} unidentified by the “${document.getElementById("nametable").selectedOptions[0].textContent}” table. Click a row to dump its packets.`;
+}
+
+/* =====================================================================
+   Hex inspector
+   ===================================================================== */
+function openOpcode(op){
+  selectedOp=op; selectedPktIdx=0;
+  document.querySelectorAll("#opc-body tr").forEach(tr=>tr.classList.toggle("sel",+tr.dataset.op===op));
+  renderInspector();
+  document.getElementById("p-inspect").scrollIntoView({behavior:"smooth",block:"nearest"});
+}
+function renderInspector(){
+  const e=censusByOp.get(selectedOp); if(!e) return;
+  const nm=nameFor(selectedOp);
+  document.getElementById("insp-meta").textContent=`${selectedOp} ${hx(selectedOp)}${nm?" · "+nm:" · unidentified"}`;
+  const n=e.idxs.length;
+  if(selectedPktIdx>=n) selectedPktIdx=n-1;
+  const segIdx=e.idxs[selectedPktIdx], s=segs[segIdx];
+  const body=document.getElementById("insp-body");
+  const nameList=e.names.size?`<span style="color:var(--violet)">${[...e.names].map(esc).join(", ")}</span>`:'<span class="dim">none</span>';
+  body.innerHTML=`
+    <div class="insp-head">
+      <span>opcode <b>${selectedOp}</b> (${hx(selectedOp)})</span>
+      <span>${n.toLocaleString()} packet${n!==1?"s":""}</span>
+      <span>sizes: <b>${[...e.lens.keys()].sort((a,b)=>a-b).join(", ")}</b> B</span>
+      <span>names inside: ${nameList}</span>
+      <span class="pktnav">
+        <button id="pk-prev">‹ prev</button>
+        <span>packet <b>${selectedPktIdx+1}</b> / ${n}</span>
+        <button id="pk-next">next ›</button>
+      </span>
+    </div>
+    <div class="seghdr">
+      <div class="c"><div class="k">stream offset</div><div class="v">0x${(DATA_START+s.offset).toString(16).toUpperCase()}</div></div>
+      <div class="c"><div class="k">timestamp</div><div class="v">${fmtClock(s.ms)} <span class="dim">(${s.ms} ms)</span></div></div>
+      <div class="c"><div class="k">data length</div><div class="v">${s.dataLength} B</div></div>
+      <div class="c"><div class="k">object id</div><div class="v">0x${s.oid.toString(16).toUpperCase()}</div></div>
+    </div>
+    <pre class="hex">${hexDump(s)}</pre>
+    <p class="hint" style="padding:8px 0 0">Name bytes are <mark>highlighted</mark>. The 12-byte segment header (opcode, length, ms, object id) precedes the payload shown here.</p>`;
+  const prev=document.getElementById("pk-prev"), next=document.getElementById("pk-next");
+  prev.disabled=selectedPktIdx<=0; next.disabled=selectedPktIdx>=n-1;
+  prev.onclick=()=>{ if(selectedPktIdx>0){ selectedPktIdx--; renderInspector(); } };
+  next.onclick=()=>{ if(selectedPktIdx<n-1){ selectedPktIdx++; renderInspector(); } };
+}
+
+/* hex+ascii dump of a packet's payload, with party-name bytes marked */
+function hexDump(s){
+  const a=s.payloadStart, len=s.dataLength;
+  // mark ranges covered by any party name
+  const marks=new Array(len).fill(false);
+  for(const pn of partyNames){
+    let from=a;
+    while(true){
+      const hit=bytesContain(from,a+len,pn.bytes);
+      if(hit<0) break;
+      for(let k=0;k<pn.bytes.length;k++) marks[hit-a+k]=true;
+      from=hit+1;
+    }
+  }
+  const lines=[]; const cap=Math.min(len,4096);
+  for(let row=0;row<cap;row+=16){
+    const off=String(row).padStart(4,"0");
+    let hexp="",asc="";
+    for(let c=0;c<16;c++){
+      if(row+c>=cap){ hexp+="   "; continue; }
+      const b=raw[a+row+c], hh=b.toString(16).padStart(2,"0");
+      const m=marks[row+c];
+      hexp+=(m?`<mark>${hh}</mark>`:hh)+" ";
+      const ch=(b>=32&&b<127)?String.fromCharCode(b):".";
+      asc+=m?`<mark>${esc(ch)}</mark>`:esc(ch);
+      if(c===7) hexp+=" ";
+    }
+    lines.push(`<span class="off">${off}</span>  ${hexp} <span class="as">${asc}</span>`);
+  }
+  if(len>cap) lines.push(`<span class="off">…</span>  ${(len-cap)} more bytes`);
+  return lines.join("\n");
+}
+
+/* =====================================================================
+   Wire-up
+   ===================================================================== */
+function esc(s){ return String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+let toastTimer=null;
+function toast(msg,isErr=false){
+  const t=document.getElementById("toast"); t.textContent=msg; t.className="show"+(isErr?" err":"");
+  clearTimeout(toastTimer); toastTimer=setTimeout(()=>t.className=isErr?"err":"",2600);
+}
+
+function load(name,buffer){
+  fileName=name;
+  try{
+    parse(buffer);
+    buildCensus();
+    buildNameTableOptions();
+    rebuildNameMap();
+    selectedOp=null;
+    renderHeader(); renderFinder(); renderCensusHead(); renderCensusBody();
+    ["p-header","p-finder","p-census","p-inspect"].forEach(id=>document.getElementById(id).classList.remove("hidden"));
+    document.getElementById("insp-meta").textContent="select an opcode";
+    document.getElementById("insp-body").innerHTML=`<p class="dim" style="font-family:var(--mono);font-size:12px">Click any opcode in the census above to dump its packets.</p>`;
+    document.getElementById("drop").classList.add("compact");
+    toast(`Read ${segs.length.toLocaleString()} packets · ${census.length} distinct opcodes · ${partyNames.length} party names.`);
+  }catch(err){ toast(err.message,true); console.error(err); }
+}
+
+// drop zone
+const drop=document.getElementById("drop"), fileInput=document.getElementById("file");
+["dragenter","dragover"].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.add("over");}));
+["dragleave","drop"].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.remove("over");}));
+drop.addEventListener("drop",e=>{ const f=e.dataTransfer.files[0]; if(f) readFile(f); });
+fileInput.addEventListener("change",e=>{ const f=e.target.files[0]; if(f) readFile(f); });
+function readFile(f){ const r=new FileReader(); r.onload=()=>load(f.name,r.result); r.readAsArrayBuffer(f); }
+
+// census interactions
+document.getElementById("opc-head").addEventListener("click",e=>{
+  const th=e.target.closest("th"); if(!th) return;
+  const k=th.dataset.k;
+  if(sortKey===k) sortDir*=-1; else { sortKey=k; sortDir=(k==="op")?1:-1; }
+  renderCensusHead(); renderCensusBody();
+});
+document.getElementById("opc-body").addEventListener("click",e=>{
+  const tr=e.target.closest("tr"); if(!tr) return; openOpcode(+tr.dataset.op);
+});
+document.getElementById("search").addEventListener("input",renderCensusBody);
+document.getElementById("only-unknown").addEventListener("change",renderCensusBody);
+document.getElementById("only-names").addEventListener("change",renderCensusBody);
+
+// name table selector (incl. paste)
+document.getElementById("nametable").addEventListener("change",e=>{
+  if(e.target.value==="paste"){
+    const txt=prompt("Paste an opcode table — either {\"PartyList\":988,…} or a full FFXIVOpcodes opcodes.json:");
+    if(!txt){ e.target.value="auto"; }
+    else{
+      try{ customTable=normalizeOpcodeTable(JSON.parse(txt));
+        if(!customTable) throw new Error("no opcode map found");
+        toast(`Loaded ${Object.keys(customTable).length} named opcodes.`);
+      }catch(err){ toast("Couldn't read that table: "+err.message,true); e.target.value="auto"; }
+    }
+  }
+  rebuildNameMap(); renderFinder(); renderCensusHead(); renderCensusBody();
+  if(selectedOp!=null) renderInspector();
+});
+
+// finder card buttons (copy / inspect / runner-up picks) via delegation
+document.getElementById("p-finder").addEventListener("click",e=>{
+  const copy=e.target.closest("[data-copy]");
+  if(copy){ navigator.clipboard?.writeText(copy.dataset.copy); toast(`Copied opcode ${copy.dataset.copy}.`); return; }
+  const open=e.target.closest("[data-open]");
+  if(open){ openOpcode(+open.dataset.open); }
+});
+
+// accept {name:opcode} or a FFXIVOpcodes opcodes.json (ported from app.js)
+function normalizeOpcodeTable(parsed){
+  if(parsed && typeof parsed==="object" && !Array.isArray(parsed) && !parsed.lists && !parsed.region){
+    const out={}; for(const k in parsed){ const v=parsed[k]; if(Number.isFinite(v)) out[k]=v; }
+    if(Object.keys(out).length) return out;
+  }
+  const regions=Array.isArray(parsed)?parsed:(parsed&&parsed.lists?[parsed]:null);
+  if(regions){
+    const r=regions.find(x=>x&&x.region==="Global")||regions[0];
+    const list=r&&r.lists&&r.lists.ServerZoneIpcType;
+    if(Array.isArray(list)){
+      const out={}; for(const it of list){ if(it&&typeof it.name==="string"&&Number.isFinite(it.opcode)) out[it.name]=it.opcode; }
+      if(Object.keys(out).length) return out;
+    }
+  }
+  return null;
+}
+})();
+</script>
+</body>
+</html>
