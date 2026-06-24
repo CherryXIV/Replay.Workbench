@@ -646,6 +646,20 @@ function loadBytes(name, buffer){
         tSub.textContent=`No opcode table for build ${curBuild}? add one to transpose`;
       }
 
+      // anonymize works on any loaded file with players; off by default
+      const aCheck=document.getElementById("anon-check"), aBox=document.getElementById("anon-appear"),
+            aRaceW=document.getElementById("anon-race-wrap"), aRace=document.getElementById("anon-race");
+      const anonOk=players.length>0;
+      aCheck.classList.toggle("disabled",!anonOk); aBox.disabled=!anonOk;
+      const raceOn=anonOk && aBox.checked;
+      aRaceW.classList.toggle("disabled",!raceOn); aRace.disabled=!raceOn;
+
+      // strip party portraits: needs the file's opcode table to find PartyPortraitInfo
+      const spCheck=document.getElementById("strip-portrait-check"), spBox=document.getElementById("strip-portrait");
+      const spOk = !!(filePatch && OPCODE_TABLES[filePatch] && OPCODE_TABLES[filePatch].PartyPortraitInfo!=null);
+      spCheck.classList.toggle("disabled",!spOk); spBox.disabled=!spOk;
+      if(!spOk) spBox.checked=false;
+
       renderHeader(); renderTimeline(); renderPullTable(); renderPlayers();
       ["p-header","p-timeline","p-pulls","p-players","p-controls"].forEach(id=>document.getElementById(id).classList.remove("hidden"));
       selectedPull=-1;
@@ -672,6 +686,175 @@ function applyTransposeIfChecked(bytes){
   return s;
 }
 
+// If "Strip party portraits" is on, physically remove every PartyPortraitInfo
+// packet from the data stream and fix up the replay length + chapter offsets.
+// Must run before transpose, while packets still carry the file's own opcodes.
+// Returns {bytes, note}: a NEW array when anything was removed, else the original.
+function stripPartyPortraitsIfChecked(bytes){
+  const box=document.getElementById("strip-portrait");
+  if(box.disabled || !box.checked) return {bytes, note:""};
+  const op=(filePatch && OPCODE_TABLES[filePatch]) ? OPCODE_TABLES[filePatch].PartyPortraitInfo : null;
+  if(op==null) return {bytes, note:""};
+  const dv=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);
+  const replayLen=dv.getInt32(OFF_REPLAY_LEN,true);
+
+  // Find every portrait segment by data-stream offset (relative to DATA_START).
+  const removed=[]; let off=0;
+  while(off<replayLen){
+    const len=dv.getUint16(DATA_START+off+2,true), total=SEG_HEADER+len;
+    if(dv.getUint16(DATA_START+off,true)===op) removed.push({at:off,total});
+    off+=total;
+  }
+  if(!removed.length) return {bytes, note:" · no portrait packets to strip"};
+  const removedBytes=removed.reduce((a,r)=>a+r.total,0);
+
+  // Rebuild: header + chapter array unchanged, body minus the portrait segments,
+  // plus any trailing bytes after the data area.
+  const out=new Uint8Array(bytes.length-removedBytes);
+  out.set(bytes.subarray(0,DATA_START),0);
+  let w=DATA_START; off=0;
+  while(off<replayLen){
+    const total=SEG_HEADER+dv.getUint16(DATA_START+off+2,true);
+    if(dv.getUint16(DATA_START+off,true)!==op){ out.set(bytes.subarray(DATA_START+off,DATA_START+off+total),w); w+=total; }
+    off+=total;
+  }
+  out.set(bytes.subarray(DATA_START+replayLen),w); // trailing bytes, if any
+
+  const ov=new DataView(out.buffer);
+  ov.setInt32(OFF_REPLAY_LEN,replayLen-removedBytes,true);
+  // Each chapter offset must drop by the bytes removed strictly before it.
+  const clen=ov.getInt32(HEADER_SIZE,true);
+  for(let i=0;i<clen && i<MAX_CHAPTERS;i++){
+    const e=HEADER_SIZE+4+i*CHAPTER_ENTRY, choff=ov.getUint32(e+4,true);
+    let shift=0; for(const r of removed) if(r.at<choff) shift+=r.total;
+    ov.setUint32(e+4,(choff-shift)>>>0,true);
+  }
+  return {bytes:out, note:` · stripped ${removed.length} portrait packet${removed.length>1?"s":""}`};
+}
+
+/* =====================================================================
+   Player anonymization — swap every party member to a chosen race (keeping
+   their gender), redress them in their job's artifact gear, and blank names.
+   Identity leaks from three packets, so all are rewritten:
+     PlayerSpawn  (664B)         — the in-arena model: race + AF gear (model IDs)
+                                   + facewear/glasses id (stripped to 0)
+     party-member appearance     — the "Party Members" portraits: race + AF gear
+       (1408B = 8x176, gear stored as item IDs; matched by length) +
+       facewear/glasses id (stripped to 0)
+                                   + mainhand/offhand weapon model (swapped to AF)
+     plus every name string, replaced length-preserving across the file.
+   AF gear comes from JOB_AF_GEAR (afgear.js): item IDs for the appearance packet,
+   [model,variant] armor + [model,base,variant] weapon for the spawn packet.
+   ===================================================================== */
+// PlayerSpawn payload offsets
+// PS_FACE: facewear/glasses model id (u16) in the 14-byte block between the gear
+// array and the name. 0 = none; confirmed against a known replay (Vivi=457).
+// PS_WEAPON/PS_WEAPON_SUB: mainhand + offhand weapon, each a u64 packed as
+// [model u16][base u16][variant u16][dye u16]. Confirmed by diffing two captures
+// that changed only the weapon glamour (item 44732 -> 2001/76/2, 22875 -> 2007/1/3).
+const PS_LEN=664, PS_WEAPON=0x30, PS_WEAPON_SUB=0x38, PS_GEAR=540, PS_GEAR_N=40, PS_FACE=590, PS_NAME=594, PS_NAME_N=32, PS_CUST=626, PS_JOB=151;
+// party-member appearance payload: 8 members of this stride
+const AP_LEN=1408, AP_STRIDE=176, AP_JOB=17, AP_GEAR=80, AP_FACE=120, AP_CUST=124;
+
+// A valid generic customize for (race, gender): default features, mid tones.
+function customizeFor(race,gender){
+  const tribe=(race-1)*2+1; // first clan of the race
+  return [race,gender,1,50,tribe,1,1,0,128,1, 1,1,0,0,1,1,1,1,1,1, 1,0,0,0,0,0];
+}
+function writeCustomize(bytes,at,race){
+  const gender=bytes[at+1]&1;            // preserve the player's gender
+  bytes.set(customizeFor(race,gender),at);
+}
+// Write a weapon u64 [model][base][variant][dye=0] at `at`. wm is [model,base,
+// variant] (from JOB_AF_GEAR), or null/undefined to clear the slot (no weapon).
+function writeWeapon(dv,at,wm){
+  dv.setUint16(at,   wm?wm[0]:0, true);
+  dv.setUint16(at+2, wm?wm[1]:0, true);
+  dv.setUint16(at+4, wm?wm[2]:0, true);
+  dv.setUint16(at+6, 0, true);          // dye
+}
+// Overwrite every occurrence of `needle` with `repl` (same length) in place.
+function replaceBytes(buf,needle,repl){
+  const n=needle.length; let count=0;
+  outer: for(let i=0;i<=buf.length-n;i++){
+    for(let j=0;j<n;j++) if(buf[i+j]!==needle[j]){ continue outer; }
+    buf.set(repl,i); count++; i+=n-1;
+  }
+  return count;
+}
+
+// If "Anonymize players" is on, rewrite spawn/appearance packets and names in
+// place. Runs before transpose so packets are still in the file's own opcodes.
+function applyAnonymizeIfChecked(bytes){
+  const box=document.getElementById("anon-appear");
+  if(box.disabled || !box.checked) return "";
+  const race=parseInt(document.getElementById("anon-race").value,10)||1;
+  const dv=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);
+  const replayLen=dv.getInt32(OFF_REPLAY_LEN,true);
+  const spawnOp=(filePatch && OPCODE_TABLES[filePatch]) ? OPCODE_TABLES[filePatch].PlayerSpawn : null;
+  const td=new TextDecoder();
+
+  // Pass 1: gather real names from PlayerSpawn, assign a stable label per name.
+  const labels=new Map(); // name string -> "Player N"
+  let off=0;
+  while(off<replayLen){
+    const b=DATA_START+off, op=dv.getUint16(b,true), len=dv.getUint16(b+2,true), p=b+SEG_HEADER;
+    if(spawnOp!=null && op===spawnOp && len===PS_LEN){
+      let end=p+PS_NAME; while(end<p+PS_NAME+PS_NAME_N && bytes[end]!==0) end++;
+      const nm=td.decode(bytes.subarray(p+PS_NAME,end));
+      if(nm && !labels.has(nm)) labels.set(nm,`Player ${labels.size+1}`);
+    }
+    off+=SEG_HEADER+len;
+  }
+
+  // Pass 2: race (+ gear) on spawn and appearance packets.
+  let spawns=0, appears=0, dressed=0;
+  off=0;
+  while(off<replayLen){
+    const b=DATA_START+off, op=dv.getUint16(b,true), len=dv.getUint16(b+2,true), p=b+SEG_HEADER;
+    if(spawnOp!=null && op===spawnOp && len===PS_LEN){
+      writeCustomize(bytes,p+PS_CUST,race);
+      const g=JOB_AF_GEAR[bytes[p+PS_JOB]];
+      if(g){ // dress the in-arena model: [model:u16][variant:u8][stain:u8] per slot
+        g.gearModels.forEach(([m,v],s)=>{ dv.setUint16(p+PS_GEAR+s*4,m,true); bytes[p+PS_GEAR+s*4+2]=v; bytes[p+PS_GEAR+s*4+3]=0; });
+        writeWeapon(dv,p+PS_WEAPON,g.weaponModel);   // mainhand -> AF weapon
+        writeWeapon(dv,p+PS_WEAPON_SUB,g.weaponSub); // offhand  -> AF secondary (or cleared)
+      } else { bytes.fill(0,p+PS_GEAR,p+PS_GEAR+PS_GEAR_N); writeWeapon(dv,p+PS_WEAPON); writeWeapon(dv,p+PS_WEAPON_SUB); }
+      dv.setUint16(p+PS_FACE,0,true); // strip facewear/glasses — it leaks identity
+      spawns++;
+    } else if(len===AP_LEN){
+      for(let i=0;i<AP_LEN/AP_STRIDE;i++){
+        const e=p+i*AP_STRIDE, job=bytes[e+AP_JOB];
+        if(dv.getUint32(e,true)===0 && dv.getUint32(e+4,true)===0) continue; // empty slot
+        if(job<1 || job>42) continue; // not a member slot — leave it alone
+        writeCustomize(bytes,e+AP_CUST,race);
+        const g=JOB_AF_GEAR[job];
+        if(g){ g.gear.forEach((id,s)=>dv.setUint32(e+AP_GEAR+s*4,id,true)); dressed++; }
+        else bytes.fill(0,e+AP_GEAR,e+AP_GEAR+40);
+        dv.setUint16(e+AP_FACE,0,true); // strip facewear/glasses here too
+      }
+      appears++;
+    }
+    off+=SEG_HEADER+len;
+  }
+
+  // Pass 3: blank names everywhere (length-preserving).
+  for(const [nm,label] of labels){
+    const need=new TextEncoder().encode(nm);
+    const rep=new Uint8Array(need.length);
+    rep.set(new TextEncoder().encode(label).subarray(0,need.length));
+    replaceBytes(bytes,need,rep);
+  }
+  return ` · anonymized ${labels.size} players (${spawns} spawns, ${dressed} dressed)`;
+}
+
+// Enable the race dropdown only while "Anonymize players" is checked.
+document.getElementById("anon-appear").addEventListener("change",e=>{
+  const on=!e.target.disabled && e.target.checked;
+  document.getElementById("anon-race-wrap").classList.toggle("disabled",!on);
+  document.getElementById("anon-race").disabled=!on;
+});
+
 document.getElementById("btn-split").addEventListener("click",async()=>{
   if(selectedPull<0) return;
   try{
@@ -680,8 +863,10 @@ document.getElementById("btn-split").addEventListener("click",async()=>{
       applyNames: document.getElementById("applynames").checked,
       countdown: document.getElementById("keepcd").checked,
     };
-    const bytes=buildPull(selectedPull,opts);
-    const note=applyTransposeIfChecked(bytes);
+    let bytes=buildPull(selectedPull,opts);
+    const anon=applyAnonymizeIfChecked(bytes);
+    const strip=stripPartyPortraitsIfChecked(bytes); bytes=strip.bytes;
+    const note=anon+strip.note+applyTransposeIfChecked(bytes);
     const ghosts=lastGhostsDropped ? ` · removed ${lastGhostsDropped} stale duplicate spawn${lastGhostsDropped>1?"s":""}` : "";
     const base=fileName.replace(/\.dat$/i,"");
     const saved=await download(bytes,`pull${pulls[selectedPull].n}_${base}.dat`);
@@ -700,8 +885,10 @@ document.getElementById("btn-anon").addEventListener("click",()=>{
 
 document.getElementById("btn-names").addEventListener("click",async()=>{
   try{
-    const bytes=buildRenamedFull();
-    const note=applyTransposeIfChecked(bytes);
+    let bytes=buildRenamedFull();
+    const anon=applyAnonymizeIfChecked(bytes);
+    const strip=stripPartyPortraitsIfChecked(bytes); bytes=strip.bytes;
+    const note=anon+strip.note+applyTransposeIfChecked(bytes);
     const saved=await download(bytes,`RENAMED_${fileName}`);
     if(saved) toast(`Exported full recording with edited names (${fmtBytes(bytes.length)})${note}.`);
   }catch(err){ toast(err.message,true); }
