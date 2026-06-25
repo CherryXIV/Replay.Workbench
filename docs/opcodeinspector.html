@@ -194,7 +194,10 @@
   <section class="panel hidden" id="p-finder">
     <div class="head">
       <h2>Custom Opcode Finder</h2>
-      <span class="meta" id="finder-meta">—</span>
+      <span style="display:flex;align-items:center;gap:12px">
+        <button class="ghost" id="btn-export" title="Download a {name:opcode} table for this build — paste it straight into the workbench dev menu">Export table JSON →</button>
+        <span class="meta" id="finder-meta">—</span>
+      </span>
     </div>
     <div class="body">
       <p class="tagline" style="margin:0 0 14px">Both packets carry your party members' <b>names</b> as text, so the
@@ -427,6 +430,44 @@ function guessPartyList(){
 }
 
 /* =====================================================================
+   Export — a {name:opcode} table ready to drop into the workbench dev
+   menu (Konami code on index.html). We start from whatever name table is
+   selected (a freshly-pasted FFXIVOpcodes opcodes.json gives every standard
+   opcode) and overwrite the two the workbench has to hand-enter each patch,
+   PartyList & PartyPortraitInfo, with the finder's best guesses from THIS
+   recording. The result is a complete table for the file's build number.
+   ===================================================================== */
+function buildExportTable(){
+  const base=activeTableObj();          // {name:opcode} or null
+  const out={};
+  const set=[];                          // which opcodes the finder supplied
+  const l=guessPartyList()[0], p=guessPortrait()[0];
+  if(l){ out.PartyList=l.op; set.push("PartyList="+l.op); }
+  if(p){ out.PartyPortraitInfo=p.op; set.push("PartyPortraitInfo="+p.op); }
+  // fold in the rest of the active table without clobbering the finder's picks
+  if(base) for(const k in base){ if(!(k in out)) out[k]=base[k]; }
+  return {out,set,hasBase:!!base};
+}
+function exportTable(){
+  if(!raw){ toast("Load a .dat first.",true); return; }
+  const {out,set,hasBase}=buildExportTable();
+  const keys=Object.keys(out);
+  if(!keys.length){
+    toast("Nothing to export — pick a name table (or paste one) so the export has opcodes to carry.",true);
+    return;
+  }
+  const json=JSON.stringify(out,null,2)+"\n";
+  const fname=`opcodes-build-${fileBuild}.json`;
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(new Blob([json],{type:"application/json"}));
+  a.download=fname; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+  const found=set.length?` · finder set ${set.join(", ")}`:"";
+  const warn=hasBase?"":" Heads up: no name table was loaded, so only the finder's opcodes are included.";
+  toast(`Exported ${keys.length} opcodes as ${fname}. In the workbench dev menu, enter build ${fileBuild} and paste this file.${found}${warn}`);
+}
+
+/* =====================================================================
    Render
    ===================================================================== */
 function fmtClock(ms){
@@ -491,7 +532,9 @@ function renderFinder(){
   }
   document.getElementById("finder-alt").innerHTML=altParts.join("");
 
-  const meta=partyNames.length?`${partyNames.length} names: ${partyNames.slice(0,4).map(n=>esc(n.name)).join(", ")}${partyNames.length>4?"…":""}`:"no party names read";
+  // assigned via textContent below, so the names must NOT be HTML-escaped
+  // (esc() here would render an apostrophe as a literal &#39;)
+  const meta=partyNames.length?`${partyNames.length} names: ${partyNames.slice(0,4).map(n=>n.name).join(", ")}${partyNames.length>4?"…":""}`:"no party names read";
   document.getElementById("finder-meta").textContent=meta;
 }
 
@@ -685,6 +728,9 @@ document.getElementById("nametable").addEventListener("change",e=>{
   rebuildNameMap(); renderFinder(); renderCensusHead(); renderCensusBody();
   if(selectedOp!=null) renderInspector();
 });
+
+// export the resolved opcode table for the workbench dev menu
+document.getElementById("btn-export").addEventListener("click",exportTable);
 
 // finder card buttons (copy / inspect / runner-up picks) via delegation
 document.getElementById("p-finder").addEventListener("click",e=>{
