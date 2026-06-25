@@ -753,6 +753,15 @@ function stripPartyPortraitsIfChecked(bytes){
 // [model u16][base u16][variant u16][dye u16]. Confirmed by diffing two captures
 // that changed only the weapon glamour (item 44732 -> 2001/76/2, 22875 -> 2007/1/3).
 const PS_LEN=664, PS_WEAPON=0x30, PS_WEAPON_SUB=0x38, PS_GEAR=540, PS_GEAR_N=40, PS_FACE=590, PS_NAME=594, PS_NAME_N=32, PS_CUST=626, PS_JOB=151;
+// PS_DISPLAY: u16 display flags at +0x74. 0x40 = hide headgear, 0x80 = hide
+// weapon — set when a player toggles those off on the character screen. We must
+// clear them after re-dressing, or the AF helm/weapon we wrote stays invisible.
+const PS_DISPLAY=0x74, DISPLAY_HIDE_GEAR=0x40|0x80;
+// PS_DYE2: per-slot second dye channel (Dawntrail), one byte per gear slot,
+// packed right after the 40-byte gear array and before PS_FACE. Left intact it
+// leaks the player's real dyes; on at least one capture the head slot's byte was
+// non-zero only on the actor whose helm refused to render after re-dressing.
+const PS_DYE2=PS_GEAR+PS_GEAR_N, PS_DYE2_N=PS_GEAR_N/4; // 580, 10 slots
 // party-member appearance payload: 8 members of this stride
 const AP_LEN=1408, AP_STRIDE=176, AP_JOB=17, AP_GEAR=80, AP_FACE=120, AP_CUST=124;
 
@@ -794,8 +803,10 @@ function applyAnonymizeIfChecked(bytes){
   const spawnOp=(filePatch && OPCODE_TABLES[filePatch]) ? OPCODE_TABLES[filePatch].PlayerSpawn : null;
   const td=new TextDecoder();
 
-  // Pass 1: gather real names from PlayerSpawn, assign a stable label per name.
+  // Pass 1: gather real names + object IDs from PlayerSpawn. Each PlayerSpawn's
+  // segment-header oid (b+8) is the spawning player's own actor/object ID.
   const labels=new Map(); // name string -> "Player N"
+  const oids=new Set();   // real player object IDs to scramble
   let off=0;
   while(off<replayLen){
     const b=DATA_START+off, op=dv.getUint16(b,true), len=dv.getUint16(b+2,true), p=b+SEG_HEADER;
@@ -803,8 +814,21 @@ function applyAnonymizeIfChecked(bytes){
       let end=p+PS_NAME; while(end<p+PS_NAME+PS_NAME_N && bytes[end]!==0) end++;
       const nm=td.decode(bytes.subarray(p+PS_NAME,end));
       if(nm && !labels.has(nm)) labels.set(nm,`Player ${labels.size+1}`);
+      const oid=dv.getUint32(b+8,true);
+      if(oid) oids.add(oid);
     }
     off+=SEG_HEADER+len;
+  }
+
+  // Build a random object ID for each player, kept in the player range
+  // (high byte 0x10) so it still reads as a valid actor id. Avoid collisions
+  // with any real id (and each other) so the length-preserving byte swaps below
+  // can't chain or alias one player's packets onto another's.
+  const idMap=new Map(); const usedIds=new Set(oids);
+  for(const id of oids){
+    let r;
+    do{ r=(0x10000000 | (Math.floor(Math.random()*0x01000000)))>>>0; }while(usedIds.has(r));
+    usedIds.add(r); idMap.set(id,r);
   }
 
   // Pass 2: race (+ gear) on spawn and appearance packets.
@@ -821,6 +845,8 @@ function applyAnonymizeIfChecked(bytes){
         writeWeapon(dv,p+PS_WEAPON_SUB,g.weaponSub); // offhand  -> AF secondary (or cleared)
       } else { bytes.fill(0,p+PS_GEAR,p+PS_GEAR+PS_GEAR_N); writeWeapon(dv,p+PS_WEAPON); writeWeapon(dv,p+PS_WEAPON_SUB); }
       dv.setUint16(p+PS_FACE,0,true); // strip facewear/glasses — it leaks identity
+      dv.setUint16(p+PS_DISPLAY, dv.getUint16(p+PS_DISPLAY,true) & ~DISPLAY_HIDE_GEAR, true); // unhide helm/weapon so the AF gear renders
+      bytes.fill(0,p+PS_DYE2,p+PS_DYE2+PS_DYE2_N); // clear residual 2nd-dye bytes for the redressed slots
       spawns++;
     } else if(len===AP_LEN){
       for(let i=0;i<AP_LEN/AP_STRIDE;i++){
@@ -845,7 +871,19 @@ function applyAnonymizeIfChecked(bytes){
     rep.set(new TextEncoder().encode(label).subarray(0,need.length));
     replaceBytes(bytes,need,rep);
   }
-  return ` · anonymized ${labels.size} players (${spawns} spawns, ${dressed} dressed)`;
+
+  // Pass 4: scramble object IDs — replace every little-endian occurrence of each
+  // real player oid (segment headers + payload actor references) with its random
+  // remap, length-preserving like the name swap.
+  let idHits=0;
+  for(const [id,r] of idMap){
+    const need=new Uint8Array(4), rep=new Uint8Array(4);
+    new DataView(need.buffer).setUint32(0,id,true);
+    new DataView(rep.buffer).setUint32(0,r,true);
+    idHits+=replaceBytes(bytes,need,rep);
+  }
+
+  return ` · anonymized ${labels.size} players (${spawns} spawns, ${dressed} dressed, ${idMap.size} ids→${idHits} refs)`;
 }
 
 // Enable the race dropdown only while "Anonymize players" is checked.
