@@ -200,10 +200,13 @@
       </span>
     </div>
     <div class="body">
-      <p class="tagline" style="margin:0 0 14px">Both packets carry your party members' <b>names</b> as text, so the
-        finder first reads the names out of the recording, then flags the opcodes whose payloads contain them.
-        <b>PartyPortraitInfo</b> is the 1408&#8209;byte (8&times;176) appearance packet; <b>PartyList</b> is the smaller
-        roster packet. Confirm a guess by clicking it — the hex view highlights the names in the bytes.</p>
+      <p class="tagline" style="margin:0 0 14px">The finder reads the party's 8&#8209;byte <b>contentIds</b> out of the
+        (named) PlayerSpawn packets, then looks for the opcodes that carry <b>several of them in a single payload</b> —
+        which is what a roster packet does and what a per&#8209;actor packet like PlayerSpawn never does. Party
+        <b>names</b> are a secondary signal, also counted per packet.
+        <b>PartyPortraitInfo</b> is the 1408&#8209;byte (8&times;176) appearance packet, and carries no name text at all;
+        <b>PartyList</b> is the large (~3672&#8209;byte) HUD roster packet. Confirm a guess by clicking it — the hex view
+        highlights the names in the bytes.</p>
       <div class="finder" id="finder-cards"></div>
       <div class="alt" id="finder-alt"></div>
     </div>
@@ -273,6 +276,8 @@ let census=[];               // per-opcode aggregates (see buildCensus)
 let censusByOp=new Map();
 let partyNames=[];           // [{name, bytes:Uint8Array}]
 let nameTableMap=null;       // active opcode->name resolution (Map)
+let rosterIds=[];            // party contentIds read from PlayerSpawn (see buildRoster)
+let rosterSpawnOp=null;      // opcode the roster was read from; null = no anchor
 let sortKey="count", sortDir=-1;
 let selectedOp=null, selectedPktIdx=0;
 
@@ -341,6 +346,49 @@ function bytesContain(a,b,needle){
   return -1;
 }
 
+/* ---- multi-needle payload scan --------------------------------------------
+   The name and roster passes each look for a handful of short byte strings in
+   every packet of a file that runs to tens of MB, and together they dominate
+   load time. So needles are bucketed by first byte and each payload is walked
+   once, rather than once per needle. `stamp` records which needles have already
+   been found in the payload being scanned without allocating a Set per packet:
+   an entry counts as set only if it holds the current generation number, so the
+   table never has to be cleared. */
+function needleGroups(list){            // [{bytes,…}] -> Map<firstByte, item[]>
+  const g=new Map();
+  list.forEach((it,i)=>{
+    it._i=i;
+    const f=it.bytes[0];
+    if(!g.has(f)) g.set(f,[]);
+    g.get(f).push(it);
+  });
+  return g;
+}
+let stamp=new Int32Array(0), stampGen=0;
+/* How many DISTINCT needles occur in raw[a,b); onHit(item) fires once per needle. */
+function countNeedles(a,b,groups,total,onHit){
+  if(stamp.length<total) stamp=new Int32Array(total);
+  const gen=++stampGen;
+  let found=0;
+  for(let i=a;i<b;i++){
+    const g=groups.get(raw[i]);
+    if(g===undefined) continue;
+    for(let k=0;k<g.length;k++){
+      const it=g[k];
+      if(stamp[it._i]===gen) continue;   // already counted in this payload
+      const nb=it.bytes, L=nb.length;
+      if(i+L>b) continue;
+      let ok=true;
+      for(let j=1;j<L;j++) if(raw[i+j]!==nb[j]){ ok=false; break; }
+      if(!ok) continue;
+      stamp[it._i]=gen;
+      if(onHit) onHit(it);
+      if(++found===total) return found;  // can't do better in this payload
+    }
+  }
+  return found;
+}
+
 /* =====================================================================
    Census — aggregate every distinct opcode
    ===================================================================== */
@@ -349,26 +397,32 @@ function buildCensus(){
   for(let idx=0;idx<segs.length;idx++){
     const s=segs[idx];
     let e=m.get(s.opcode);
-    if(!e){ e={op:s.opcode,count:0,bytes:0,lens:new Map(),firstMs:s.ms,lastMs:s.ms,idxs:[],names:new Set()};
+    if(!e){ e={op:s.opcode,count:0,bytes:0,lens:new Map(),firstMs:s.ms,lastMs:s.ms,idxs:[],
+                names:new Set(),namesMax:0,rosterMax:0};
       m.set(s.opcode,e); }
     e.count++; e.bytes+=s.dataLength;
     e.lens.set(s.dataLength,(e.lens.get(s.dataLength)||0)+1);
     if(s.ms<e.firstMs) e.firstMs=s.ms; if(s.ms>e.lastMs) e.lastMs=s.ms;
     e.idxs.push(idx);
   }
-  // which party names appear inside each opcode's payloads (only worth checking
-  // packets big enough to hold a name)
+  /* Which party names appear inside each opcode's payloads.
+     namesMax — the most names found in a SINGLE packet — is the only count that
+     may be ranked on. `names` is the union across every packet of the opcode and
+     is display-only: a per-actor packet such as PlayerSpawn sends one member per
+     packet, so its union is the whole party and it looks identical to the roster
+     packet that really does carry all 8 at once. Ranking on the union is what
+     made the finder report PlayerSpawn as PartyList. */
   if(partyNames.length){
+    const groups=needleGroups(partyNames);
+    const shortest=Math.min(...partyNames.map(pn=>pn.bytes.length));
     for(const e of m.values()){
       for(const idx of e.idxs){
         const s=segs[idx];
-        if(s.dataLength<2) continue;
-        const a=s.payloadStart, b=s.payloadStart+s.dataLength;
-        for(const pn of partyNames){
-          if(e.names.has(pn.name)) continue;
-          if(bytesContain(a,b,pn.bytes)>=0) e.names.add(pn.name);
-        }
-        if(e.names.size>=partyNames.length) break;
+        if(s.dataLength<shortest) continue;
+        const per=countNeedles(s.payloadStart,s.payloadStart+s.dataLength,groups,
+                               partyNames.length,pn=>e.names.add(pn.name));
+        if(per>e.namesMax) e.namesMax=per;
+        if(e.namesMax>=partyNames.length) break;   // can't score higher
       }
     }
   }
@@ -412,20 +466,99 @@ function rebuildNameMap(){
 function nameFor(op){ return nameTableMap.get(op)||null; }
 
 /* =====================================================================
+   Party roster anchor
+   ---------------------------------------------------------------------
+   Names are a weak signal — they are plain text, so any packet carrying a
+   single member matches, and one match per packet is indistinguishable from
+   the whole roster once you stop counting per packet.
+
+   The party's 8-byte contentIds are the strong signal. They are read out of
+   the PlayerSpawn packets, which every opcode table names, and the packets
+   we are hunting are the ones that carry SEVERAL of those ids in one
+   payload. This also identifies PartyPortraitInfo, which carries contentIds
+   and gear but no name text whatsoever — names can never find it.
+
+   Mirrors tools/find_partylist_opcode.py, which has always got this right.
+   ===================================================================== */
+// A full alliance is 24 players; past that the "ids" are almost certainly some
+// other packet's bytes because the loaded table names the wrong PlayerSpawn. The
+// cap keeps a wrong anchor from turning into a needle list that slows every scan.
+const ROSTER_CAP=32;
+function buildRoster(){
+  const t=activeTableObj();
+  const spawnOp=(t && Number.isFinite(t.PlayerSpawn))?t.PlayerSpawn:null;
+  if(spawnOp===rosterSpawnOp) return;      // same anchor — scores still valid
+  rosterSpawnOp=spawnOp; rosterIds=[];
+  if(spawnOp!=null){
+    const seen=new Set();
+    for(const s of segs){
+      if(rosterIds.length>=ROSTER_CAP) break;
+      if(s.opcode!==spawnOp || s.dataLength<8) continue;
+      const cid=raw.subarray(s.payloadStart,s.payloadStart+8);
+      let zero=true; for(const b of cid) if(b!==0){ zero=false; break; }
+      if(zero) continue;                   // unfilled id, not a real player
+      const key=cid.join(",");
+      if(!seen.has(key)){ seen.add(key); rosterIds.push({bytes:cid}); }
+    }
+  }
+  scoreRoster();
+}
+/* rosterMax = the most distinct roster contentIds found in a SINGLE packet. */
+function scoreRoster(){
+  for(const e of census) e.rosterMax=0;
+  if(rosterIds.length<2) return;
+  const groups=needleGroups(rosterIds);
+  for(const e of census){
+    if(e.op===rosterSpawnOp) continue;     // the anchor itself is not a party packet
+    for(const idx of e.idxs){
+      const s=segs[idx];
+      if(s.dataLength<16) continue;        // too small to hold two ids
+      const hits=countNeedles(s.payloadStart,s.payloadStart+s.dataLength,groups,rosterIds.length,null);
+      if(hits>e.rosterMax) e.rosterMax=hits;
+      if(e.rosterMax>=rosterIds.length) break;   // can't score higher
+    }
+  }
+}
+/* The anchor is only believable once some packet carries two of its ids together.
+   If nothing does, the loaded table named the wrong opcode as PlayerSpawn and the
+   ids are just that packet's bytes — report no anchor rather than a bogus "0/42". */
+function rosterUsable(){
+  return rosterIds.length>=2 && census.some(e=>e.rosterMax>=2);
+}
+
+/* =====================================================================
    The finder — best guesses for PartyList & PartyPortraitInfo
    ===================================================================== */
+/* What the active name table thinks of an opcode, relative to the packet we are
+   hunting: +1 it already IS that packet, 0 unidentified (the normal state for
+   these two on a fresh patch), -1 it belongs to a DIFFERENT packet. A table that
+   calls an opcode PlayerSpawn is direct evidence it is not the party roster, so
+   those rank last — but they stay in the list rather than being dropped, in case
+   the loaded table is the stale one. */
+function tableAffinity(op,target){
+  const nm=nameFor(op);
+  if(!nm) return 0;
+  return nm===target?1:-1;
+}
 function guessPortrait(){
-  // strongest signal: a packet that is consistently 1408 bytes AND carries names
+  // The 1408-byte appearance packet. It carries contentIds and gear, never name
+  // text, so name counts must not rank these — only the roster and the table can.
   const cands=census.filter(e=>e.lens.has(PORTRAIT_LEN));
-  cands.sort((a,b)=>(b.names.size-a.names.size)||(b.count-a.count));
+  cands.sort((a,b)=>
+    (tableAffinity(b.op,"PartyPortraitInfo")-tableAffinity(a.op,"PartyPortraitInfo"))||
+    (b.rosterMax-a.rosterMax)||(b.count-a.count));
   return cands;
 }
 function guessPartyList(){
-  // packets that carry >=2 party names but are NOT the 1408-byte portrait packet,
-  // ranked by how many distinct names they hold then by rarity (the roster is
-  // pushed on party/zone changes, not every frame)
-  const cands=census.filter(e=>e.names.size>=2 && !e.lens.has(PORTRAIT_LEN));
-  cands.sort((a,b)=>(b.names.size-a.names.size)||(a.count-b.count));
+  // The HUD roster packet: it holds most of the party IN ONE PAYLOAD — several
+  // contentIds, or several names — and it is the large one (~3672 B). Every count
+  // here is per packet on purpose; ranking on an opcode's union of names instead
+  // promotes PlayerSpawn, which sends one member per packet, to the top.
+  const cands=census.filter(e=>!e.lens.has(PORTRAIT_LEN) && (e.rosterMax>=2 || e.namesMax>=2));
+  cands.sort((a,b)=>
+    (tableAffinity(b.op,"PartyList")-tableAffinity(a.op,"PartyList"))||
+    (b.rosterMax-a.rosterMax)||(b.namesMax-a.namesMax)||
+    (b.modalLen-a.modalLen)||(a.count-b.count));
   return cands;
 }
 
@@ -437,6 +570,17 @@ function guessPartyList(){
    PartyList & PartyPortraitInfo, with the finder's best guesses from THIS
    recording. The result is a complete table for the file's build number.
    ===================================================================== */
+/* Names in `t` that share an opcode. A table like this is not merely untidy: the
+   workbench's transpose maps packets by name, so two names on one opcode collapse
+   two packet types into one. The client then parses one of them with the other's
+   struct — a 3672-byte PartyList read as a 664-byte PlayerSpawn — and crashes.
+   This is exactly what shipped when the finder picked PlayerSpawn's opcode for
+   PartyList, so the export refuses to emit it. */
+function opcodeCollisions(t){
+  const byOp=new Map();
+  for(const k in t){ const op=t[k]; if(!byOp.has(op)) byOp.set(op,[]); byOp.get(op).push(k); }
+  return [...byOp.entries()].filter(([,names])=>names.length>1);
+}
 function buildExportTable(){
   const base=activeTableObj();          // {name:opcode} or null
   const out={};
@@ -446,16 +590,32 @@ function buildExportTable(){
   if(p){ out.PartyPortraitInfo=p.op; set.push("PartyPortraitInfo="+p.op); }
   // fold in the rest of the active table without clobbering the finder's picks
   if(base) for(const k in base){ if(!(k in out)) out[k]=base[k]; }
-  return {out,set,hasBase:!!base};
+  return {out,set,hasBase:!!base,collisions:opcodeCollisions(out)};
 }
 function exportTable(){
   if(!raw){ toast("Load a .dat first.",true); return; }
-  const {out,set,hasBase}=buildExportTable();
+  const {out,set,hasBase,collisions}=buildExportTable();
   const keys=Object.keys(out);
   if(!keys.length){
     toast("Nothing to export — pick a name table (or paste one) so the export has opcodes to carry.",true);
     return;
   }
+  // Never write a table that would crash the game (see opcodeCollisions).
+  const bad=collisions.filter(([,names])=>names.some(n=>n==="PartyList"||n==="PartyPortraitInfo"));
+  if(bad.length){
+    const [op,names]=bad[0];
+    toast(`Export blocked: opcode ${op} would be both ${names.join(" and ")}. `+
+          `Transposing onto that table collapses two packet types onto one opcode and crashes the game. `+
+          `Open ${op} in the inspector — if it really is ${names.find(n=>n!=="PartyList"&&n!=="PartyPortraitInfo")||"another packet"}, `+
+          `pick a different candidate from the finder.`,true);
+    return;
+  }
+  // Collisions that don't involve the finder's picks came in with the loaded
+  // table; they're survivable but those names still can't be transposed, so say so.
+  const dupNote=collisions.length
+    ? ` Warning: the loaded table puts ${collisions.length} opcode${collisions.length>1?"s":""} under two names `+
+      `(e.g. ${collisions[0][0]} = ${collisions[0][1].join(", ")}); those names won't transpose.`
+    : "";
   const json=JSON.stringify(out,null,2)+"\n";
   const fname=`opcodes-build-${fileBuild}.json`;
   const a=document.createElement("a");
@@ -464,7 +624,7 @@ function exportTable(){
   setTimeout(()=>URL.revokeObjectURL(a.href),1000);
   const found=set.length?` · finder set ${set.join(", ")}`:"";
   const warn=hasBase?"":" Heads up: no name table was loaded, so only the finder's opcodes are included.";
-  toast(`Exported ${keys.length} opcodes as ${fname}. In the workbench dev menu, enter build ${fileBuild} and paste this file.${found}${warn}`);
+  toast(`Exported ${keys.length} opcodes as ${fname}. In the workbench dev menu, enter build ${fileBuild} and paste this file.${found}${warn}${dupNote}`);
 }
 
 /* =====================================================================
@@ -504,11 +664,22 @@ function finderCard(title,desc,cands,isPortrait){
       ${partyNames.length?"":" The finder needs party names — none were read from this file."}</div></div>`;
   }
   const named=nameFor(top.op);
+  // Every claim below is per packet. "Holds 8 names" used to mean "8 names appear
+  // somewhere across this opcode's packets", which reads as roster evidence but is
+  // equally true of 8 separate one-name packets.
   const why=[];
   if(isPortrait) why.push(`<span class="ok">✓ 1408-byte appearance packet</span>`);
-  why.push(top.names.size?`<span class="ok">✓ holds ${top.names.size} party name${top.names.size>1?"s":""}</span>`:`<span class="warn">no names matched</span>`);
+  if(rosterUsable()){
+    why.push(top.rosterMax>=2
+      ? `<span class="ok">✓ ${top.rosterMax}/${rosterIds.length} roster members in one packet</span>`
+      : `<span class="warn">only ${top.rosterMax}/${rosterIds.length} roster members in a single packet</span>`);
+  }
+  if(top.namesMax>=2) why.push(`<span class="ok">✓ ${top.namesMax} party names in one packet</span>`);
+  else if(top.namesMax===1) why.push(`<span class="warn">1 name per packet</span> <span style="color:var(--ink-faint)">(${top.names.size} across all ${top.count})</span>`);
+  else if(!isPortrait || !rosterUsable()) why.push(`<span class="warn">no names matched</span>`);
   why.push(`appears <b style="color:var(--ink-dim)">${top.count}×</b>`);
-  if(named) why.push(named===title?`<span class="ok">✓ matches the loaded table</span>`:`table calls it <b style="color:var(--ink-dim)">${esc(named)}</b>`);
+  if(named) why.push(named===title?`<span class="ok">✓ matches the loaded table</span>`
+    :`<span class="warn">⚠ the loaded table calls this ${esc(named)}</span>`);
   return `<div class="fcard hit"><h3>${title}</h3><div class="desc">${desc}</div>
     <div class="fbig">${top.op}<button class="copybtn" data-copy="${top.op}">copy</button></div>
     <div class="fhex">${hx(top.op)} · modal size ${top.modalLen} B</div>
@@ -525,7 +696,12 @@ function renderFinder(){
   // runner-up candidates the user can jump to
   const altParts=[];
   if(portraits.length>1) altParts.push(`<div><b>Other portrait-size opcodes:</b> ${portraits.slice(1,5).map(e=>`<span class="pick" data-open="${e.op}">${e.op}</span>`).join(", ")}</div>`);
-  if(lists.length>1) altParts.push(`<div><b>Other name-bearing opcodes:</b> ${lists.slice(1,6).map(e=>`<span class="pick" data-open="${e.op}">${e.op} <span style="color:var(--ink-faint)">(${e.names.size}n)</span></span>`).join(", ")}</div>`);
+  // counts are per packet: "8r" = 8 roster ids in one payload, "8n" = 8 names in one
+  if(lists.length>1) altParts.push(`<div><b>Other roster-bearing opcodes:</b> ${lists.slice(1,6).map(e=>{
+    const ev=[]; if(e.rosterMax) ev.push(e.rosterMax+"r"); if(e.namesMax) ev.push(e.namesMax+"n");
+    const nm=nameFor(e.op);
+    return `<span class="pick" data-open="${e.op}">${e.op} <span style="color:var(--ink-faint)">(${ev.join("/")}${nm?" · "+esc(nm):""})</span></span>`;
+  }).join(", ")}</div>`);
   if(filePatch && typeof OPCODE_TABLES!=="undefined"){
     const t=OPCODE_TABLES[filePatch];
     altParts.push(`<div style="margin-top:6px;color:var(--ink-faint)">This build's table already records PartyList=<b style="color:var(--ink-dim)">${t.PartyList}</b>, PartyPortraitInfo=<b style="color:var(--ink-dim)">${t.PartyPortraitInfo}</b> — use the finder to verify them on a fresh patch.</div>`);
@@ -535,14 +711,18 @@ function renderFinder(){
   // assigned via textContent below, so the names must NOT be HTML-escaped
   // (esc() here would render an apostrophe as a literal &#39;)
   const meta=partyNames.length?`${partyNames.length} names: ${partyNames.slice(0,4).map(n=>n.name).join(", ")}${partyNames.length>4?"…":""}`:"no party names read";
-  document.getElementById("finder-meta").textContent=meta;
+  const anchor=rosterUsable()?` · roster anchor: ${rosterIds.length} ids from PlayerSpawn ${rosterSpawnOp}`
+    :rosterSpawnOp!=null?` · roster anchor unusable — no packet pairs the ids read from opcode ${rosterSpawnOp}, so that isn't PlayerSpawn on this build`
+    :" · no roster anchor (needs PlayerSpawn in the name table)";
+  document.getElementById("finder-meta").textContent=meta+anchor;
 }
 
 const COLS=[
   {k:"op",label:"opcode",get:e=>e.op,cell:e=>{
-    const nm=nameFor(e.op); const tags=[];
+    const tags=[];
     if(isPortraitCand(e)) tags.push('<span class="tag party">portrait?</span>');
-    else if(e.names.size>=2) tags.push('<span class="tag party">names</span>');
+    else if(e.rosterMax>=2) tags.push('<span class="tag party">roster</span>');
+    else if(e.namesMax>=2) tags.push('<span class="tag party">names</span>');
     return `<span class="dec">${e.op}</span> <span class="dim">${hx(e.op)}</span>${tags.join("")}`;
   }},
   {k:"name",label:"resolved name",get:e=>nameFor(e.op)||"~",cell:e=>{
@@ -553,7 +733,14 @@ const COLS=[
     const multi=e.lens.size>1?`<span class="dim"> (${e.lens.size} sizes)</span>`:"";
     return `${e.modalLen} B${multi}`;
   }},
-  {k:"names",label:"names",get:e=>e.names.size,cell:e=>e.names.size?`<span style="color:var(--violet)">${e.names.size}</span>`:`<span class="dim">—</span>`},
+  // per packet, not the union across packets — the union can't tell a roster
+  // packet apart from N single-member packets
+  {k:"namesMax",label:"names/pkt",get:e=>e.namesMax,cell:e=>e.namesMax
+    ? `<span style="color:var(--violet)" title="${e.names.size} distinct name${e.names.size>1?"s":""} across all ${e.count} packet${e.count>1?"s":""}">${e.namesMax}</span>`
+    : `<span class="dim">—</span>`},
+  {k:"rosterMax",label:"roster/pkt",get:e=>e.rosterMax,cell:e=>(e.rosterMax && rosterUsable())
+    ? `<span style="color:var(--violet)">${e.rosterMax}<span class="dim">/${rosterIds.length}</span></span>`
+    : `<span class="dim">—</span>`},
   {k:"firstMs",label:"first",get:e=>e.firstMs,cell:e=>`<span class="dim">${fmtClock(e.firstMs)}</span>`},
   {k:"lastMs",label:"last",get:e=>e.lastMs,cell:e=>`<span class="dim">${fmtClock(e.lastMs)}</span>`},
 ];
@@ -604,13 +791,18 @@ function renderInspector(){
   if(selectedPktIdx>=n) selectedPktIdx=n-1;
   const segIdx=e.idxs[selectedPktIdx], s=segs[segIdx];
   const body=document.getElementById("insp-body");
-  const nameList=e.names.size?`<span style="color:var(--violet)">${[...e.names].map(esc).join(", ")}</span>`:'<span class="dim">none</span>';
+  const nameList=e.names.size
+    ? `<span style="color:var(--violet)">${[...e.names].map(esc).join(", ")}</span> <span class="dim">(max ${e.namesMax} in one packet)</span>`
+    : '<span class="dim">none</span>';
+  const rosterLine=rosterUsable()
+    ? `<span>roster ids: <b>${e.rosterMax}/${rosterIds.length}</b> <span class="dim">in one packet</span></span>` : "";
   body.innerHTML=`
     <div class="insp-head">
       <span>opcode <b>${selectedOp}</b> (${hx(selectedOp)})</span>
       <span>${n.toLocaleString()} packet${n!==1?"s":""}</span>
       <span>sizes: <b>${[...e.lens.keys()].sort((a,b)=>a-b).join(", ")}</b> B</span>
       <span>names inside: ${nameList}</span>
+      ${rosterLine}
       <span class="pktnav">
         <button id="pk-prev">‹ prev</button>
         <span>packet <b>${selectedPktIdx+1}</b> / ${n}</span>
@@ -681,6 +873,7 @@ function load(name,buffer){
     buildCensus();
     buildNameTableOptions();
     rebuildNameMap();
+    rosterSpawnOp=null; buildRoster();   // needs the resolved table for PlayerSpawn
     selectedOp=null;
     renderHeader(); renderFinder(); renderCensusHead(); renderCensusBody();
     ["p-header","p-finder","p-census","p-inspect"].forEach(id=>document.getElementById(id).classList.remove("hidden"));
@@ -725,7 +918,8 @@ document.getElementById("nametable").addEventListener("change",e=>{
       }catch(err){ toast("Couldn't read that table: "+err.message,true); e.target.value="auto"; }
     }
   }
-  rebuildNameMap(); renderFinder(); renderCensusHead(); renderCensusBody();
+  // a different table can name a different PlayerSpawn, which moves the anchor
+  rebuildNameMap(); buildRoster(); renderFinder(); renderCensusHead(); renderCensusBody();
   if(selectedOp!=null) renderInspector();
 });
 

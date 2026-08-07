@@ -114,6 +114,21 @@ function resolveOpcodes(build){
   FIRST_ATTACK_OPCODE = (t && t.FirstAttack!=null) ? t.FirstAttack : 0;
 }
 
+// IPC names in `table` that share one opcode. Transpose maps packets by name, so a
+// duplicated opcode value collapses two packet types into one: the client parses
+// one of them with the other's struct and crashes. (A 3672-byte PartyList arriving
+// on PlayerSpawn's opcode is how this bit us before.) Both the dev menu and
+// transpose refuse such a table rather than write a replay that takes the game down.
+function opcodeCollisions(table){
+  const byOp=new Map();
+  for(const name in table){ const op=table[name]; if(!byOp.has(op)) byOp.set(op,[]); byOp.get(op).push(name); }
+  return [...byOp.entries()].filter(([,names])=>names.length>1);
+}
+function describeCollisions(cols,limit=2){
+  return cols.slice(0,limit).map(([op,names])=>`${op} = ${names.join(" + ")}`).join("; ")
+    + (cols.length>limit?`; +${cols.length-limit} more`:"");
+}
+
 // Build an old->new opcode map by matching IPC names between two patch tables.
 function opcodeRemap(fromPatch,toPatch){
   const from=OPCODE_TABLES[fromPatch], to=OPCODE_TABLES[toPatch];
@@ -128,6 +143,13 @@ function opcodeRemap(fromPatch,toPatch){
 function transposeOpcodes(bytes){
   if(!filePatch) return {ok:false,reason:`no opcode table for build ${fileBuild}`};
   if(filePatch===LATEST_PATCH) return {ok:false,reason:"already on the latest patch"};
+  // Refuse before touching a byte: remapping onto a table with a duplicated opcode
+  // produces a file that crashes the client. Skipping the transpose is recoverable.
+  for(const [patch,label] of [[LATEST_PATCH,"target"],[filePatch,"source"]]){
+    const cols=opcodeCollisions(OPCODE_TABLES[patch]||{});
+    if(cols.length) return {ok:false,reason:`the ${label} table (${patch}) gives one opcode two packet names `+
+      `(${describeCollisions(cols)}) — remapping onto it would crash the game; fix the table first`};
+  }
   const map=opcodeRemap(filePatch,LATEST_PATCH);
   if(!map) return {ok:false,reason:"missing patch table"};
   const dvb=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);
@@ -1003,6 +1025,15 @@ function applyDevMenu(){
   catch(err){ devHint("Opcodes JSON didn't parse: "+err.message,true); return; }
   const table=normalizeOpcodeTable(parsed);
   if(!table){ devHint("Couldn't read an opcode table from that JSON (expected {name:opcode} or a FFXIVOpcodes opcodes.json).",true); return; }
+  // Reject a self-contradicting table here, at the door. Registering it promotes it
+  // to the transpose target, and every export made against it would crash the game.
+  const cols=opcodeCollisions(table);
+  if(cols.length){
+    devHint(`Rejected: this table gives one opcode two packet names (${describeCollisions(cols)}). `+
+            `Transpose maps packets by name, so those two packet types would collapse onto a single `+
+            `opcode and the client would crash reading one as the other. Fix the duplicate and re-apply.`,true);
+    return;
+  }
 
   const patchKey="Custom-"+build;
   OPCODE_TABLES[patchKey]=table;
