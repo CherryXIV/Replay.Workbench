@@ -1,0 +1,493 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>[archived] Replay Workbench - A .dat tool</title>
+<style>
+  /* ---- design tokens ----
+     Subject: a binary packet inspector for FFXIV duty recordings.
+     Direction: instrument panel. Dark slate, phosphor-cyan readouts, amber for the
+     recorder/local player, monospace data with one humanist sans for chrome. The
+     signature element is the pull TIMELINE — the recording rendered as a track of
+     selectable wipe segments, the way you'd scrub an oscilloscope capture. */
+  :root{
+    --bg:#0d1117;
+    --panel:#141b24;
+    --panel-2:#1b2531;
+    --line:#263344;
+    --ink:#d6e2f0;
+    --ink-dim:#7d8da0;
+    --ink-faint:#4d5a6b;
+    --phosphor:#39d4c8;       /* primary readout */
+    --phosphor-deep:#1c6f6a;
+    --amber:#f2b84c;          /* recorder / local player */
+    --violet:#8b7cf6;         /* waymarks */
+    --danger:#e8654f;
+    --radius:6px;
+    --mono:"JetBrains Mono",ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+    --sans:"Inter",-apple-system,system-ui,sans-serif;
+  }
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap');
+
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{
+    background:var(--bg);
+    color:var(--ink);
+    font-family:var(--sans);
+    font-size:14px;
+    line-height:1.5;
+    -webkit-font-smoothing:antialiased;
+    background-image:radial-gradient(circle at 50% -10%, rgba(57,212,200,.05), transparent 60%);
+  }
+  .wrap{max-width:1100px;margin:0 auto;padding:32px 24px 80px}
+
+  /* ---- header ---- */
+  header.app{display:flex;align-items:baseline;gap:16px;flex-wrap:wrap;margin-bottom:6px}
+  header.app h1{
+    font-family:var(--mono);font-weight:700;font-size:20px;letter-spacing:-.01em;
+    color:var(--ink);
+  }
+  header.app h1 .dot{color:var(--phosphor)}
+  header.app .sub{font-family:var(--mono);font-size:12px;color:var(--ink-dim)}
+  .tagline{color:var(--ink-dim);font-size:13px;margin-bottom:22px;max-width:64ch}
+
+  /* ---- tab switcher ---- */
+  .tabs-nav{margin-left:auto;display:flex;gap:8px}
+  .tabbtn{font-family:var(--mono);font-size:12px;color:var(--ink-dim);background:transparent;
+    border:1px solid var(--line);border-radius:var(--radius);padding:6px 14px;cursor:pointer;transition:all .12s}
+  .tabbtn:hover{color:var(--ink);border-color:var(--ink-faint)}
+  .tabbtn.cur{color:var(--phosphor);border-color:var(--phosphor-deep);background:rgba(57,212,200,.06)}
+  .tablink{font-family:var(--mono);font-size:12px;color:var(--ink-dim);background:transparent;text-decoration:none;
+    border:1px solid var(--line);border-radius:var(--radius);padding:6px 14px;cursor:pointer;transition:all .12s}
+  .tablink:hover{color:var(--ink);border-color:var(--ink-faint)}
+
+  /* ---- drop zone ---- */
+  .drop{
+    display:block;
+    border:1px dashed var(--line);border-radius:var(--radius);
+    background:linear-gradient(180deg,var(--panel),transparent);
+    padding:48px 24px;text-align:center;cursor:pointer;
+    transition:border-color .15s,background .15s,padding .15s;
+  }
+  .drop:hover,.drop.over{border-color:var(--phosphor);background:rgba(57,212,200,.04)}
+  .drop.compact{padding:14px 24px}
+  .drop .big{font-family:var(--mono);font-size:15px;color:var(--ink);margin-bottom:6px}
+  .drop.compact .big{font-size:12px;margin:0}
+  .drop .small{font-size:12px;color:var(--ink-dim)}
+  .drop .small b{color:var(--phosphor);font-weight:500}
+  input[type=file]{display:none}
+
+  /* ---- panels ---- */
+  .panel{
+    background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+    margin-top:20px;overflow:hidden;
+  }
+  .panel > .head{
+    display:flex;align-items:center;justify-content:space-between;
+    padding:12px 16px;border-bottom:1px solid var(--line);background:var(--panel-2);
+  }
+  .panel > .head h2{
+    font-family:var(--mono);font-size:12px;font-weight:500;letter-spacing:.08em;
+    text-transform:uppercase;color:var(--ink-dim);
+  }
+  .panel > .head .meta{font-family:var(--mono);font-size:12px;color:var(--phosphor)}
+  .panel > .body{padding:16px}
+
+  /* ---- header readout grid ---- */
+  .readout{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:1px;background:var(--line)}
+  .readout .cell{background:var(--panel);padding:12px 14px}
+  .readout .k{font-family:var(--mono);font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-faint);margin-bottom:4px}
+  .readout .v{font-family:var(--mono);font-size:14px;color:var(--ink);word-break:break-all}
+  .readout .v.cyan{color:var(--phosphor)}
+  .readout .v.amber{color:var(--amber)}
+
+  /* ---- timeline (signature) ---- */
+  .timeline-wrap{padding:20px 16px 8px}
+  .tl-axis{position:relative;height:64px;margin:0 4px}
+  .tl-track{position:absolute;top:26px;left:0;right:0;height:12px;background:var(--panel-2);border:1px solid var(--line);border-radius:3px;overflow:hidden}
+  .tl-seg{position:absolute;top:0;height:100%;cursor:pointer;border-right:1px solid var(--bg);transition:filter .12s}
+  .tl-seg:hover{filter:brightness(1.4)}
+  .tl-seg.sel{outline:2px solid var(--phosphor);outline-offset:0;z-index:3}
+  .tl-tick{position:absolute;top:42px;font-family:var(--mono);font-size:9px;color:var(--ink-faint);transform:translateX(-50%)}
+  .tl-flag{position:absolute;top:6px;width:1px;background:var(--ink-faint);height:18px}
+  .tl-flag.wm{background:var(--violet);height:20px}
+  .tl-legend{display:flex;gap:18px;flex-wrap:wrap;margin-top:14px;font-family:var(--mono);font-size:11px;color:var(--ink-dim)}
+  .tl-legend .sw{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:6px;vertical-align:-1px}
+
+  /* ---- pull list ---- */
+  table.pulls{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:13px}
+  table.pulls th{
+    text-align:left;font-weight:500;font-size:10px;letter-spacing:.08em;text-transform:uppercase;
+    color:var(--ink-faint);padding:8px 12px;border-bottom:1px solid var(--line);
+  }
+  table.pulls td{padding:9px 12px;border-bottom:1px solid var(--panel-2);color:var(--ink)}
+  table.pulls tr{cursor:pointer}
+  table.pulls tr:hover td{background:var(--panel-2)}
+  table.pulls tr.sel td{background:rgba(57,212,200,.08);color:var(--ink)}
+  table.pulls tr.sel td:first-child{box-shadow:inset 3px 0 0 var(--phosphor)}
+  table.pulls .num{color:var(--phosphor)}
+  table.pulls .dim{color:var(--ink-dim)}
+  table.pulls .cd{margin-left:6px;color:var(--amber);font-size:11px;cursor:help}
+
+  /* ---- players ---- */
+  .players{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:10px}
+  .pl{display:flex;align-items:center;gap:10px;background:var(--panel-2);border:1px solid var(--line);border-radius:var(--radius);padding:8px 10px}
+  .pl .idx{font-family:var(--mono);font-size:11px;color:var(--ink-faint);width:18px;text-align:right}
+  .pl .job{font-family:var(--mono);font-size:10px;color:var(--ink-dim);width:34px;text-transform:uppercase}
+  .pl input{
+    flex:1;background:var(--bg);border:1px solid var(--line);border-radius:4px;
+    color:var(--ink);font-family:var(--mono);font-size:13px;padding:6px 8px;min-width:0;
+  }
+  .pl input:focus{outline:none;border-color:var(--phosphor)}
+  .pl.rec{border-color:var(--amber)}
+  .pl.rec .idx{color:var(--amber)}
+  .pl .reclabel{font-family:var(--mono);font-size:9px;color:var(--amber);letter-spacing:.05em}
+
+  /* ---- controls ---- */
+  .controls{display:flex;align-items:center;gap:20px;flex-wrap:wrap;margin-top:18px}
+  .check{display:flex;align-items:center;gap:9px;cursor:pointer;user-select:none}
+  .check input{position:absolute;opacity:0;width:0;height:0}
+  .check .box{width:18px;height:18px;border:1px solid var(--line);border-radius:4px;background:var(--panel-2);display:grid;place-items:center;transition:all .12s}
+  .check input:checked + .box{background:var(--violet);border-color:var(--violet)}
+  .check input:checked + .box::after{content:"";width:5px;height:9px;border:solid var(--bg);border-width:0 2px 2px 0;transform:rotate(45deg) translateY(-1px)}
+  .check input:focus-visible + .box{outline:2px solid var(--phosphor);outline-offset:2px}
+  .check .lbl{font-size:13px;color:var(--ink)}
+  .check .lbl small{display:block;color:var(--ink-dim);font-size:11px}
+  .check.disabled{opacity:.45;cursor:not-allowed}
+  .anon-race{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--ink);cursor:pointer;user-select:none}
+  .anon-race select{background:var(--panel-2);border:1px solid var(--line);border-radius:4px;
+    color:var(--ink);font-family:var(--mono);font-size:12px;padding:5px 8px;cursor:pointer}
+  .anon-race select:focus{outline:none;border-color:var(--phosphor)}
+  .anon-race.disabled{opacity:.45;cursor:not-allowed}
+  .anon-race.disabled select{cursor:not-allowed}
+
+  .spacer{flex:1}
+  /* both export buttons share a full-width bottom row, primary first */
+  .export-actions{display:flex;align-items:center;gap:14px;flex-basis:100%;margin-top:4px}
+  button.act{
+    font-family:var(--mono);font-size:13px;font-weight:500;
+    background:var(--phosphor);color:#05201e;border:none;border-radius:var(--radius);
+    padding:11px 20px;cursor:pointer;transition:filter .12s,transform .05s;
+  }
+  button.act:hover{filter:brightness(1.1)}
+  button.act:active{transform:translateY(1px)}
+  button.act:disabled{background:var(--panel-2);color:var(--ink-faint);cursor:not-allowed}
+  button.ghost{
+    font-family:var(--mono);font-size:13px;background:transparent;color:var(--ink-dim);
+    border:1px solid var(--line);border-radius:var(--radius);padding:11px 16px;cursor:pointer;
+  }
+  button.ghost:hover{color:var(--ink);border-color:var(--ink-faint)}
+
+  .hint{font-family:var(--mono);font-size:11px;color:var(--ink-dim);margin-top:10px}
+  .hidden{display:none !important}
+
+  /* ---- playback map ---- */
+  .layout{display:grid;grid-template-columns:1fr 240px;gap:0}
+  @media(max-width:760px){.layout{grid-template-columns:1fr}}
+  .stage-wrap{position:relative;height:480px;background:var(--bg);border-right:1px solid var(--line)}
+  @media(max-width:760px){.stage-wrap{border-right:none;border-bottom:1px solid var(--line);height:380px}}
+  canvas#stage{display:block;width:100%;height:100%;cursor:grab}
+  canvas#stage:active{cursor:grabbing}
+  .side{padding:12px 14px;overflow:auto;max-height:480px}
+  @media(max-width:760px){.side{max-height:260px}}
+  .side h3{font-family:var(--mono);font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-faint);margin-bottom:8px}
+  .leg-row{display:flex;align-items:center;gap:8px;padding:4px 2px;cursor:pointer;border-radius:4px}
+  .leg-row:hover{background:var(--panel-2)}
+  .leg-row input{accent-color:var(--phosphor);width:14px;height:14px}
+  .leg-row .sw{width:10px;height:10px;border-radius:2px;flex:none}
+  .leg-row .nm{font-family:var(--mono);font-size:12px;color:var(--ink);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .leg-row .cnt{font-family:var(--mono);font-size:10px;color:var(--ink-faint)}
+  #npc-note{font-family:var(--mono);font-size:10px;color:var(--ink-faint);margin-top:8px}
+  .transport{display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:14px 16px;border-top:1px solid var(--line);background:var(--panel-2)}
+  button.tbtn{font-family:var(--mono);font-size:13px;font-weight:500;background:var(--phosphor);color:#05201e;
+    border:none;border-radius:var(--radius);padding:9px 18px;cursor:pointer;transition:filter .12s}
+  button.tbtn:hover{filter:brightness(1.1)}
+  button.tbtn.playing{background:var(--amber);color:#2a1c02}
+  #scrub{flex:1;min-width:160px;accent-color:var(--phosphor)}
+  #clock{font-family:var(--mono);font-size:12px;color:var(--phosphor);min-width:96px;text-align:right}
+  .spds{display:flex;gap:4px}
+  .spd{font-family:var(--mono);font-size:11px;background:transparent;color:var(--ink-dim);
+    border:1px solid var(--line);border-radius:4px;padding:5px 8px;cursor:pointer}
+  .spd.on{color:var(--phosphor);border-color:var(--phosphor-deep);background:rgba(57,212,200,.06)}
+  .opts{display:flex;align-items:center;gap:16px;flex-wrap:wrap;padding:10px 16px;border-top:1px solid var(--line)}
+  .opt{display:flex;align-items:center;gap:7px;font-family:var(--mono);font-size:12px;color:var(--ink-dim);cursor:pointer}
+  .opt input{accent-color:var(--violet);width:14px;height:14px}
+  select#pullsel{font-family:var(--mono);font-size:12px;background:var(--bg);color:var(--ink);
+    border:1px solid var(--line);border-radius:4px;padding:6px 8px;max-width:100%}
+
+  /* ---- toast ---- */
+  #toast{
+    position:fixed;left:50%;bottom:28px;transform:translateX(-50%) translateY(20px);
+    background:var(--panel-2);border:1px solid var(--phosphor);color:var(--ink);
+    font-family:var(--mono);font-size:13px;padding:12px 18px;border-radius:var(--radius);
+    opacity:0;pointer-events:none;transition:all .2s;z-index:50;max-width:90vw;
+  }
+  #toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+  #toast.err{border-color:var(--danger)}
+
+  /* ---- dev menu (konami) ---- */
+  #devmenu{
+    position:fixed;inset:0;z-index:60;display:flex;align-items:center;justify-content:center;
+    background:rgba(5,8,12,.72);padding:24px;
+  }
+  .dev-card{
+    width:min(640px,100%);max-height:88vh;display:flex;flex-direction:column;
+    background:var(--panel);border:1px solid var(--phosphor-deep);border-radius:var(--radius);
+    box-shadow:0 18px 60px rgba(0,0,0,.5);overflow:hidden;
+  }
+  .dev-head{display:flex;align-items:center;justify-content:space-between;
+    padding:12px 16px;border-bottom:1px solid var(--line);background:var(--panel-2)}
+  .dev-head h2{font-family:var(--mono);font-size:12px;font-weight:500;letter-spacing:.08em;
+    text-transform:uppercase;color:var(--phosphor)}
+  .dev-x{background:transparent;border:none;color:var(--ink-dim);font-size:16px;cursor:pointer;line-height:1}
+  .dev-x:hover{color:var(--ink)}
+  .dev-body{padding:16px;overflow:auto}
+  .dev-lbl{display:block;font-family:var(--mono);font-size:10px;letter-spacing:.08em;
+    text-transform:uppercase;color:var(--ink-faint);margin:0 0 6px}
+  .dev-src{float:right;color:var(--phosphor);text-decoration:none;text-transform:none;letter-spacing:0}
+  .dev-src:hover{text-decoration:underline}
+  .dev-body input,.dev-body textarea{
+    width:100%;background:var(--bg);border:1px solid var(--line);border-radius:4px;
+    color:var(--ink);font-family:var(--mono);font-size:13px;padding:8px 10px;margin-bottom:16px;
+  }
+  .dev-body input:focus,.dev-body textarea:focus{outline:none;border-color:var(--phosphor)}
+  .dev-body textarea{min-height:200px;resize:vertical;line-height:1.4;white-space:pre;overflow-wrap:normal}
+  .dev-hint{font-family:var(--mono);font-size:11px;color:var(--ink-dim);margin-bottom:0}
+  .dev-hint.dev-err{color:var(--danger)}
+  .dev-foot{display:flex;align-items:center;gap:10px;padding:12px 16px;border-top:1px solid var(--line);background:var(--panel-2)}
+
+  footer{margin-top:40px;font-family:var(--mono);font-size:11px;color:var(--ink-faint);text-align:center;line-height:1.8}
+  footer b{color:var(--ink-dim);font-weight:500}
+</style>
+</head>
+<body>
+<div class="archive-banner">
+  <b>Archived build.</b> This is the workbench as it stood before opcode transposing moved onto
+  the per-patch opcode diffs. It only knows the patch tables baked into its own <code>opcodes.js</code>
+  (7.51 and later), and it is not updated. <a href="../">Go to the current version</a>.
+</div>
+<style>
+  .archive-banner{max-width:1100px;margin:16px auto 0;padding:10px 14px;border:1px solid var(--amber);
+    border-radius:var(--radius);background:rgba(242,184,76,.08);color:var(--ink-dim);
+    font-family:var(--mono);font-size:12px;line-height:1.6}
+  .archive-banner b{color:var(--amber)}
+  .archive-banner code{color:var(--ink)}
+  .archive-banner a{color:var(--phosphor)}
+</style>
+<div class="wrap">
+  <header class="app">
+    <h1>Replay<span class="dot">.</span>Workbench</h1>
+    <span class="sub">FFXIV duty recorder (.dat) toolkit</span>
+    <nav class="tabs-nav">
+      <button class="tabbtn cur" data-tab="editor">Editor</button>
+      <button class="tabbtn" data-tab="playback">Playback</button>
+    </nav>
+  </header>
+  <p class="tagline">Open an "A Realm Recorded" recordings to inspect it's header, rename players, and
+    export a single pull, or switch to <b style="color:var(--phosphor)">Playback</b> to scrub through
+    where every actor stood. Everything runs in your browser. Your file never leaves your machine.</p>
+
+  <!-- shared drop zone -->
+  <label class="drop" id="drop" for="file">
+    <div class="big">Drop a <b style="color:var(--phosphor)">.dat</b> here, or click to browse.</div>
+    <div class="small">Shared between both tabs</div>
+    <input type="file" id="file" accept=".dat">
+  </label>
+
+  <div id="tabs" class="hidden">
+
+    <!-- ============ EDITOR TAB ============ -->
+    <div id="tab-editor">
+      <!-- header readout -->
+      <section class="panel hidden" id="p-header">
+        <div class="head"><h2>Recording Header</h2><span class="meta" id="h-file">—</span></div>
+        <div class="readout" id="readout"></div>
+      </section>
+
+      <!-- timeline -->
+      <section class="panel hidden" id="p-timeline">
+        <div class="head"><h2>Pull Timeline</h2><span class="meta" id="t-count">—</span></div>
+        <div class="timeline-wrap">
+          <div class="tl-axis" id="tlaxis"></div>
+          <div class="tl-legend">
+            <span><span class="sw" style="background:var(--phosphor)"></span>Selected Pull</span>
+            <span><span class="sw" style="background:var(--phosphor-deep)"></span>Pull (Wipe Segment)</span>
+            <span><span class="sw" style="background:var(--violet)"></span>Waymark Placement</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- pull table -->
+      <section class="panel hidden" id="p-pulls">
+        <div class="head"><h2>Pulls</h2><span class="meta" id="pull-sel">none selected</span></div>
+        <div class="body" style="padding:0">
+          <table class="pulls">
+            <thead><tr><th>#</th><th>type</th><th>starts</th><th>length</th><th>combat</th><th>respawn batch</th></tr></thead>
+            <tbody id="pulltbody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- players -->
+      <section class="panel hidden" id="p-players">
+        <div class="head"><h2>Players</h2>
+          <span style="display:flex;align-items:center;gap:12px">
+            <button class="ghost" id="btn-anon" style="padding:5px 12px;font-size:12px" title="Replace every name with Player 1, Player 2, …">Anonymize all names</button>
+            <span class="meta" id="pl-count">—</span>
+          </span></div>
+        <div class="body">
+          <div class="players" id="players"></div>
+          <div class="hint">Edit a name and it's rewritten everywhere it appears, and is reflected live on the Playback map. Names are limited to 31 bytes. The <span style="color:var(--amber)">amber</span> player is the recorder.</div>
+        </div>
+      </section>
+
+      <!-- controls -->
+      <section class="panel hidden" id="p-controls">
+        <div class="head"><h2>Export</h2><span class="meta">Single pull → .dat</span></div>
+        <div class="body">
+          <div class="controls">
+            <label class="check" id="wm-check">
+              <input type="checkbox" id="wm" checked>
+              <span class="box"></span>
+              <span class="lbl">Re-apply waymarks
+                <small id="wm-sub">Carry the last waymarks into the pull</small></span>
+            </label>
+            <label class="check" id="names-check">
+              <input type="checkbox" id="applynames" checked>
+              <span class="box"></span>
+              <span class="lbl">Apply name edits
+                <small>Use the names above in the exported file</small></span>
+            </label>
+            <label class="check" id="cd-check">
+              <input type="checkbox" id="keepcd" checked>
+              <span class="box"></span>
+              <span class="lbl">Keep countdown
+                <small>Add a selectable chapter at the engage</small></span>
+            </label>
+            <label class="check disabled" id="transpose-check">
+              <input type="checkbox" id="transpose" disabled>
+              <span class="box"></span>
+              <span class="lbl">Transpose opcodes to latest
+                <small id="transpose-sub">Remap packets so the current client reads them</small></span>
+            </label>
+            <label class="check disabled" id="anon-check">
+              <input type="checkbox" id="anon-appear" disabled>
+              <span class="box"></span>
+              <span class="lbl">Anonymize players
+                <small id="anon-sub">Replace names, object IDs, race, gear &amp; weapons so no one is identifiable</small></span>
+            </label>
+            <label class="anon-race disabled" id="anon-race-wrap">Race
+              <select id="anon-race" disabled>
+                <option value="1" selected>Hyur</option>
+                <option value="2">Elezen</option>
+                <option value="3">Lalafell</option>
+                <option value="4">Miqo'te</option>
+                <option value="5">Roegadyn</option>
+                <option value="6">Au Ra</option>
+                <option value="7">Hrothgar</option>
+                <option value="8">Viera</option>
+              </select>
+            </label>
+            <label class="check disabled" id="strip-portrait-check">
+              <input type="checkbox" id="strip-portrait" disabled>
+              <span class="box"></span>
+              <span class="lbl">Strip party portraits
+                <small id="strip-portrait-sub">Delete the PartyPortraitInfo packets entirely</small></span>
+            </label>
+            <div class="export-actions">
+              <button class="act" id="btn-split" disabled>Export selected pull</button>
+              <button class="ghost" id="btn-names" title="Save the whole recording with edited names, nothing split">Export renamed full file</button>
+            </div>
+          </div>
+          <div class="hint" id="export-hint">Select a pull from the timeline or table to enable export.</div>
+        </div>
+      </section>
+    </div>
+
+    <!-- ============ PLAYBACK TAB ============ -->
+    <div id="tab-playback" class="hidden">
+      <section class="panel" id="viewer">
+        <div class="head">
+          <h2>Map Playback</h2>
+          <span class="meta" id="meta">—</span>
+        </div>
+        <div style="padding:12px 16px 0">
+          <select id="pullsel"></select>
+        </div>
+        <div class="layout">
+          <div class="stage-wrap"><canvas id="stage"></canvas></div>
+          <div class="side">
+            <h3>Actors</h3>
+            <div id="legend"></div>
+            <div id="npc-note"></div>
+          </div>
+        </div>
+        <div class="transport">
+          <button class="tbtn" id="btn-play">▶ Play</button>
+          <input type="range" id="scrub" min="0" max="1000" value="0">
+          <span id="clock">00:00 / 00:00</span>
+          <span class="spds">
+            <button class="spd" data-s="0.5">0.5×</button>
+            <button class="spd on" data-s="1">1×</button>
+            <button class="spd" data-s="2">2×</button>
+            <button class="spd" data-s="4">4×</button>
+          </span>
+        </div>
+        <div class="opts">
+          <label class="opt"><input type="checkbox" id="chk-trail" checked> Motion Trails</label>
+          <label class="opt"><input type="checkbox" id="chk-cast" checked> Cast Pulses</label>
+          <label class="opt"><input type="checkbox" id="chk-waymark" checked> Waymarks</label>
+          <label class="opt"><input type="checkbox" id="chk-npc"> Show NPCs / Unnamed Actors</label>
+          <span style="color:var(--ink-faint)">Scroll = Zoom · Drag = Pan · dbl-click = Reset · Space = Play · ←/→ = Step</span>
+        </div>
+      </section>
+      <p class="hint">Named dots are players (renaming them in the Editor updates them here); the amber ring marks the recorder.
+        Pick a single pull from the dropdown to watch just that attempt.</p>
+    </div>
+
+  </div>
+
+  <footer>
+    <div><b>replay.workbench</b> · web based editor · <a href="opcodeinspector.html" style="color:var(--phosphor);text-decoration:none">opcode.inspector</a></div>
+    <div>pull splitting &amp; player editing · positional playback from movement packets</div>
+  </footer>
+</div>
+
+<!-- dev menu: opened by the Konami code (↑ ↑ ↓ ↓ ← → ← →) -->
+<div id="devmenu" class="hidden">
+  <div class="dev-card">
+    <div class="dev-head">
+      <h2>Dev menu — register opcodes</h2>
+      <button class="dev-x" id="dev-close" title="Close">✕</button>
+    </div>
+    <div class="dev-body">
+      <label class="dev-lbl" for="dev-build">Game build number</label>
+      <input type="text" id="dev-build" inputmode="numeric" placeholder="e.g. 13592030" autocomplete="off">
+      <label class="dev-lbl" for="dev-json">Opcodes JSON
+        <a class="dev-src" href="https://raw.githubusercontent.com/karashiiro/FFXIVOpcodes/refs/heads/master/opcodes.json" target="_blank" rel="noopener noreferrer">karashiiro/FFXIVOpcodes opcodes.json ↗</a>
+      </label>
+      <textarea id="dev-json" spellcheck="false" autocomplete="off" placeholder='{ "ActorCast":457, "ActorControl":415, "NpcSpawn":888, … }
+
+— or paste a full FFXIVOpcodes opcodes.json (Global ServerZoneIpcType is used)'></textarea>
+      <div class="dev-hint" id="dev-hint"></div>
+    </div>
+    <div class="dev-foot">
+      <button class="ghost" id="dev-prefill" title="Drop the latest built-in table into the box to tweak">Prefill latest</button>
+      <div class="spacer"></div>
+      <button class="ghost" id="dev-cancel">Cancel</button>
+      <button class="act" id="dev-apply">Apply</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script src="opcodes.js"></script>
+<script src="afgear.js"></script>
+<script src="app.js"></script>
+<script src="timeline.js"></script>
+<script src="shell.js"></script>
+</body>
+</html>
