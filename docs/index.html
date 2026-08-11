@@ -359,6 +359,9 @@
               <span class="lbl">Transpose opcodes to latest
                 <small id="transpose-sub">Remap packets so the current client reads them</small></span>
             </label>
+            <label class="anon-race disabled" id="src-patch-wrap">Recorded on
+              <select id="src-patch" disabled></select>
+            </label>
             <label class="check disabled" id="anon-check">
               <input type="checkbox" id="anon-appear" disabled>
               <span class="box"></span>
@@ -437,7 +440,7 @@
   </div>
 
   <footer>
-    <div><b>replay.workbench</b> · web based editor · <a href="opcodeinspector.html" style="color:var(--phosphor);text-decoration:none">opcode.inspector</a></div>
+    <div><b>replay.workbench</b> · web based editor · <a href="opcodeinspector.html" style="color:var(--phosphor);text-decoration:none">opcode.inspector</a> · <a href="old/" style="color:var(--phosphor);text-decoration:none">previous version</a></div>
     <div>pull splitting &amp; player editing · positional playback from movement packets</div>
   </footer>
 </div>
@@ -472,6 +475,8 @@
 <div id="toast"></div>
 
 <script src="opcodes.js"></script>
+<script src="patchdiffs.js"></script>
+<script src="patchchain.js"></script>
 <script src="afgear.js"></script>
 <script src="app.js"></script>
 <script src="timeline.js"></script>

@@ -91,14 +91,47 @@ function decodeName(off){ // null-terminated within 32-byte field
 
 /* =====================================================================
    Opcodes: per-patch resolution + transpose
+
+   Two data sources with different jobs:
+
+   patchdiffs.js (PATCH_CHAIN / PATCH_DIFFS) records which opcode number
+     became which at each game patch, read out of the binary's IPC vtable.
+     Transpose runs on this and nothing else: it is exact, it covers every
+     Dawntrail patch, and it never needs to know what a packet is called.
+
+   opcodes.js (OPCODE_TABLES) holds IPC *names*, for the inspector's labels
+     and for the handful of packets this tool looks up by name (NpcSpawn,
+     PlaceFieldMarker, PartyPortraitInfo, the combat-timing set). Names come
+     from a third-party dump that lags patches and has been wrong before —
+     PartyList and PartyPortraitInfo both needed hand-correction — so they
+     label packets; they no longer decide how packets get rewritten.
+
+   Only the latest patch needs a pasted-in name table. Every older patch's
+   names are projected backwards from it through the chain (patchTable()),
+   so the inspector reads a 7.0 recording with the same names as a 7.5 one.
+   Both live in patchchain.js, loaded before this file.
    ===================================================================== */
 let fileBuild=0, filePatch=null;   // set by resolveOpcodes() from the loaded file
+let patchOverride=null;            // the patch the user picked by hand, if any
+let patchDetected=null;            // what the file's own opcodes say (detectPatch)
+
+/* Which patch a file is on, most trustworthy source first.
+
+   The file's opcodes beat BUILD_TO_PATCH because that table is typed in by hand
+   and a wrong entry does not fail loudly: every packet still gets remapped, just
+   onto the wrong packet type. Detection is only allowed to win when it accounts
+   for the file exactly and no other patch comes close. */
+function decidePatch(build){
+  if(patchOverride) return patchOverride;
+  if(patchDetected && patchDetected.confident) return patchDetected.patch;
+  return BUILD_TO_PATCH[build]||null;
+}
 
 // Point the tool's parsing opcodes at the loaded file's patch (falls back to defaults).
 function resolveOpcodes(build){
   fileBuild=build;
-  filePatch=BUILD_TO_PATCH[build]||null;
-  const t = filePatch ? OPCODE_TABLES[filePatch] : null;
+  filePatch=decidePatch(build);
+  const t = filePatch ? patchTable(filePatch) : null;
   if(t){
     if(t.NpcSpawn!=null) SPAWN_OPCODE=t.NpcSpawn;
     if(t.PlaceFieldMarker!=null) WAYMARK_OPCODE=t.PlaceFieldMarker;
@@ -129,42 +162,76 @@ function describeCollisions(cols,limit=2){
     + (cols.length>limit?`; +${cols.length-limit} more`:"");
 }
 
-// Build an old->new opcode map by matching IPC names between two patch tables.
-function opcodeRemap(fromPatch,toPatch){
-  const from=OPCODE_TABLES[fromPatch], to=OPCODE_TABLES[toPatch];
-  if(!from||!to) return null;
-  const map=new Map();
-  for(const name in from){ if(to[name]!=null && from[name]!==to[name]) map.set(from[name],to[name]); }
-  return map;
+// How to get from one patch to another. The diff chain is the real answer; the
+// name tables are a stopgap for the one case the chain can't cover — a brand new
+// patch registered through the dev menu, which has names published but no diff yet.
+function remapPlan(from,to){
+  const chain=patchChainMap(from,to);
+  if(chain) return {ok:true, via:"diffs", map:chain.map, lost:chain.lost};
+
+  const fromTable=OPCODE_TABLES[from], toTable=OPCODE_TABLES[to];
+  if(!hasNames(fromTable)||!hasNames(toTable)) return {ok:false,reason:`no diff and no opcode table linking ${from} to ${to}`};
+  // Remapping by name onto a table with a duplicated opcode collapses two packet
+  // types into one and the client crashes reading one as the other. Refuse before
+  // touching a byte — skipping the transpose is recoverable, shipping that isn't.
+  for(const [patch,table,label] of [[to,toTable,"target"],[from,fromTable,"source"]]){
+    const cols=opcodeCollisions(table);
+    if(cols.length) return {ok:false,reason:`the ${label} table (${patch}) gives one opcode two packet names `+
+      `(${describeCollisions(cols)}) — remapping onto it would crash the game; fix the table first`};
+  }
+  const map=new Map(), lost=new Map();
+  for(const name in fromTable){
+    if(toTable[name]!=null) map.set(fromTable[name],toTable[name]);
+    else lost.set(fromTable[name],`${name} has no entry in ${to}`);
+  }
+  return {ok:true, via:"names", map, lost};
 }
 
 // Rewrite every segment opcode in a finished export buffer from its patch to LATEST_PATCH.
 // Returns coverage info so the UI can be honest about how complete the remap is.
 function transposeOpcodes(bytes){
-  if(!filePatch) return {ok:false,reason:`no opcode table for build ${fileBuild}`};
+  if(!filePatch) return {ok:false,reason:`no patch known for build ${fileBuild}`};
   if(filePatch===LATEST_PATCH) return {ok:false,reason:"already on the latest patch"};
-  // Refuse before touching a byte: remapping onto a table with a duplicated opcode
-  // produces a file that crashes the client. Skipping the transpose is recoverable.
-  for(const [patch,label] of [[LATEST_PATCH,"target"],[filePatch,"source"]]){
-    const cols=opcodeCollisions(OPCODE_TABLES[patch]||{});
-    if(cols.length) return {ok:false,reason:`the ${label} table (${patch}) gives one opcode two packet names `+
-      `(${describeCollisions(cols)}) — remapping onto it would crash the game; fix the table first`};
-  }
-  const map=opcodeRemap(filePatch,LATEST_PATCH);
-  if(!map) return {ok:false,reason:"missing patch table"};
+  const plan=remapPlan(filePatch,LATEST_PATCH);
+  if(!plan.ok) return plan;
+
   const dvb=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);
   const replayLen=dvb.getInt32(OFF_REPLAY_LEN,true);
-  const named=new Set(Object.values(OPCODE_TABLES[filePatch]));
-  let off=0, rewritten=0, segTotal=0, unknownSegs=0; const unknownKinds=new Set();
+
+  // First pass: what's actually in the file. Opcodes at 0xf000 and up are replay
+  // control markers, not IPC, and are left alone.
+  const hist=new Map();
+  let off=0, segTotal=0;
+  while(off<replayLen){
+    const b=DATA_START+off;
+    const op=dvb.getUint16(b,true);
+    if(op<0xf000) hist.set(op,(hist.get(op)||0)+1);
+    segTotal++;
+    off+=SEG_HEADER+dvb.getUint16(b+2,true);
+  }
+
+  // An opcode we can't map keeps its old number. That's survivable on its own,
+  // but if some *other* packet has since moved onto that number, the client reads
+  // the leftovers with the wrong struct and dies. Check before writing anything.
+  const targets=new Set();
+  for(const op of hist.keys()){ const t=plan.map.get(op); if(t!==undefined) targets.add(t); }
+  const stale=[...hist.keys()].filter(op=>!plan.map.has(op)&&targets.has(op));
+  if(stale.length) return {ok:false,reason:`${stale.length} packet type(s) can't be remapped `+
+    `(${stale.slice(0,3).map(o=>"0x"+o.toString(16)).join(", ")}${stale.length>3?", …":""}) and another packet `+
+    `has moved onto their opcodes — the export would crash the client`};
+
+  let rewritten=0, unknownSegs=0; const unknownKinds=new Set();
+  off=0;
   while(off<replayLen){
     const b=DATA_START+off;
     const op=dvb.getUint16(b,true), len=dvb.getUint16(b+2,true);
-    segTotal++;
-    if(map.has(op)) dvb.setUint16(b,map.get(op),true), rewritten++;
-    else if(op<0xf000 && !named.has(op)){ unknownSegs++; unknownKinds.add(op); } // not an IPC name we know
+    const to=plan.map.get(op);
+    if(to!==undefined){ if(to!==op){ dvb.setUint16(b,to,true); rewritten++; } }
+    else if(op<0xf000){ unknownSegs++; unknownKinds.add(op); }
     off+=SEG_HEADER+len;
   }
-  return {ok:true, from:filePatch, to:LATEST_PATCH, rewritten, segTotal, unknownSegs, unknownKinds:unknownKinds.size};
+  return {ok:true, from:filePatch, to:LATEST_PATCH, via:plan.via, rewritten, segTotal,
+          unknownSegs, unknownKinds:unknownKinds.size};
 }
 
 /* =====================================================================
@@ -175,18 +242,24 @@ function parse(buffer){
   dv = new DataView(raw.buffer);
   for(let i=0;i<MAGIC.length;i++) if(raw[i]!==MAGIC[i]) throw new Error("Not an FFXIVREPLAY .dat (bad header).");
 
-  resolveOpcodes(i32(OFF_BUILD));
-
   const replayLength = i32(OFF_REPLAY_LEN);
 
   // walk segments
   segs=[]; let off=0;
+  const hist=new Map();
   while(off < replayLength){
     const b = DATA_START+off;
     const opcode=u16(b), dataLength=u16(b+2), ms=u32(b+4), oid=u32(b+8);
     segs.push({offset:off,opcode,dataLength,ms,oid,total:SEG_HEADER+dataLength});
+    hist.set(opcode,(hist.get(opcode)||0)+1);
     off += SEG_HEADER+dataLength;
   }
+
+  // Which patch this is has to wait for the segment walk: the answer comes from
+  // the opcodes themselves, with the build number as a fallback. Everything
+  // below reads packets by name (spawns, waymarks, combat), so it runs after.
+  patchDetected = (typeof detectPatch==="function") ? detectPatch(hist) : null;
+  resolveOpcodes(i32(OFF_BUILD));
 
   // chapters
   chapters=[]; const clen=i32(HEADER_SIZE);
@@ -641,6 +714,60 @@ function emitNames(){
   document.dispatchEvent(new CustomEvent("rw-names",{detail:map}));
 }
 
+/* Patch controls: which patch the file was recorded on, and whether it can be
+   transposed to the latest. The patch is read out of the file's own opcodes
+   (detectPatch), with the build number as a fallback and the picker as the last
+   word. The tooltip says which of the three answered, because when the build
+   table and the file disagree, the build table is the one that's wrong. */
+function renderPatchControls(){
+  const sel=document.getElementById("src-patch"), wrap=document.getElementById("src-patch-wrap");
+  const fromBuild=BUILD_TO_PATCH[fileBuild]||null;
+  const det=patchDetected;
+  if(!sel.options.length){
+    sel.appendChild(new Option("unknown",""));
+    for(let i=PATCH_CHAIN.length-1;i>=0;i--) sel.appendChild(new Option(PATCH_CHAIN[i],PATCH_CHAIN[i]));
+  }
+  // A dev-menu table isn't in the chain but is a legitimate answer while it's registered.
+  if(filePatch && !inChain(filePatch) && !sel.querySelector(`option[value="${filePatch}"]`))
+    sel.insertBefore(new Option(filePatch,filePatch),sel.options[1]);
+  sel.value = filePatch || "";
+  sel.disabled=false; wrap.classList.remove("disabled");
+
+  const source = patchOverride ? "you picked it"
+    : (det && det.confident) ? `read from the file's opcodes (${Math.round(det.packets*100)}% fit, next best ${det.runnerUp})`
+    : fromBuild ? `from build ${fileBuild}`
+    : "not identified";
+  wrap.title = `Patch: ${source}`;
+
+  const tCheck=document.getElementById("transpose-check"), tBox=document.getElementById("transpose"),
+        tSub=document.getElementById("transpose-sub");
+  const enable=(on)=>{ tCheck.classList.toggle("disabled",!on); tBox.disabled=!on; if(!on) tBox.checked=false; };
+  if(!filePatch){
+    enable(false);
+    tSub.textContent = det
+      ? `Couldn't identify the patch - closest is ${det.patch} at ${Math.round(det.packets*100)}%; pick one`
+      : `Build ${fileBuild} isn't a patch we know - pick the patch it was recorded on`;
+    return;
+  }
+  if(filePatch===LATEST_PATCH){
+    enable(false);
+    tSub.textContent=`Already on the latest patch (${LATEST_PATCH})`;
+    return;
+  }
+  const plan=remapPlan(filePatch,LATEST_PATCH);
+  if(!plan.ok){ enable(false); tSub.textContent=`Can't remap ${filePatch}: ${plan.reason}`; return; }
+  enable(true); tBox.checked=true;
+  const hops=(inChain(filePatch)&&inChain(LATEST_PATCH)) ? PATCH_POS.get(LATEST_PATCH)-PATCH_POS.get(filePatch) : 0;
+  let msg = plan.via==="diffs"
+    ? `Remap ${filePatch} to ${LATEST_PATCH} through ${hops} patch${hops===1?"":"es"} of opcode diffs`
+    : `Remap ${filePatch} to ${LATEST_PATCH} by IPC name (no diff for ${LATEST_PATCH} yet)`;
+  // Say it out loud when the build table would have sent this file down the wrong
+  // chain: a one-hotfix-off guess remaps every packet onto the wrong packet type.
+  if(!patchOverride && det && det.confident && fromBuild && fromBuild!==det.patch)
+    msg += ` - build ${fileBuild} is listed as ${fromBuild}, but the packets say ${det.patch}`;
+  tSub.textContent=msg;
+}
+
 function loadBytes(name, buffer){
   fileName=name;
   {
@@ -652,21 +779,7 @@ function loadBytes(name, buffer){
       if(hasWaymark){ wmCheck.classList.remove("disabled"); wm.disabled=false; wmSub.textContent="Carry the last waymarks into the pull"; }
       else{ wmCheck.classList.add("disabled"); wm.checked=false; wm.disabled=true; wmSub.textContent="None captured in this file"; }
 
-      // opcode transpose (which also re-stamps the build): only when we have a patch
-      // table for this build and it isn't already the latest
-      const curBuild=i32(OFF_BUILD);
-      const tCheck=document.getElementById("transpose-check"), tBox=document.getElementById("transpose"),
-            tSub=document.getElementById("transpose-sub");
-      if(filePatch && filePatch!==LATEST_PATCH){
-        tCheck.classList.remove("disabled"); tBox.disabled=false; tBox.checked=true;
-        tSub.textContent=`Remap ${filePatch} to ${LATEST_PATCH}`;
-      } else if(filePatch===LATEST_PATCH){
-        tCheck.classList.add("disabled"); tBox.checked=false; tBox.disabled=true;
-        tSub.textContent=`Already on the latest patch (${LATEST_PATCH})`;
-      } else {
-        tCheck.classList.add("disabled"); tBox.checked=false; tBox.disabled=true;
-        tSub.textContent=`No opcode table for build ${curBuild}? add one to transpose`;
-      }
+      renderPatchControls();
 
       // anonymize works on any loaded file with players; off by default
       const aCheck=document.getElementById("anon-check"), aBox=document.getElementById("anon-appear"),
@@ -678,7 +791,8 @@ function loadBytes(name, buffer){
 
       // strip party portraits: needs the file's opcode table to find PartyPortraitInfo
       const spCheck=document.getElementById("strip-portrait-check"), spBox=document.getElementById("strip-portrait");
-      const spOk = !!(filePatch && OPCODE_TABLES[filePatch] && OPCODE_TABLES[filePatch].PartyPortraitInfo!=null);
+      const spTable=patchTable(filePatch);
+      const spOk = !!(spTable && spTable.PartyPortraitInfo!=null);
       spCheck.classList.toggle("disabled",!spOk); spBox.disabled=!spOk;
       if(!spOk) spBox.checked=false;
 
@@ -700,10 +814,13 @@ function loadBytes(name, buffer){
 function applyTransposeIfChecked(bytes){
   const box=document.getElementById("transpose");
   if(box.disabled || !box.checked) return "";
-  new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength).setInt32(OFF_BUILD,LATEST_GAME_BUILD,true);
+  // Remap first, stamp second. A file stamped to the latest build but still
+  // carrying its old opcodes is the one combination that loads and then crashes,
+  // so the build only moves once the packets actually did.
   const r=transposeOpcodes(bytes);
   if(!r.ok) return ` (transpose skipped: ${r.reason})`;
-  let s=` · ${r.from}→${r.to}: ${r.rewritten}/${r.segTotal} packets remapped`;
+  new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength).setInt32(OFF_BUILD,LATEST_GAME_BUILD,true);
+  let s=` · ${r.from}→${r.to} via ${r.via}: ${r.rewritten}/${r.segTotal} packets remapped`;
   if(r.unknownSegs>0) s+=`, ${r.unknownSegs} unmapped`;
   return s;
 }
@@ -715,7 +832,8 @@ function applyTransposeIfChecked(bytes){
 function stripPartyPortraitsIfChecked(bytes){
   const box=document.getElementById("strip-portrait");
   if(box.disabled || !box.checked) return {bytes, note:""};
-  const op=(filePatch && OPCODE_TABLES[filePatch]) ? OPCODE_TABLES[filePatch].PartyPortraitInfo : null;
+  const t=patchTable(filePatch);
+  const op=t ? t.PartyPortraitInfo : null;
   if(op==null) return {bytes, note:""};
   const dv=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);
   const replayLen=dv.getInt32(OFF_REPLAY_LEN,true);
@@ -822,7 +940,8 @@ function applyAnonymizeIfChecked(bytes){
   const race=parseInt(document.getElementById("anon-race").value,10)||1;
   const dv=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);
   const replayLen=dv.getInt32(OFF_REPLAY_LEN,true);
-  const spawnOp=(filePatch && OPCODE_TABLES[filePatch]) ? OPCODE_TABLES[filePatch].PlayerSpawn : null;
+  const spawnTable=patchTable(filePatch);
+  const spawnOp=spawnTable ? spawnTable.PlayerSpawn : null;
   const td=new TextDecoder();
 
   // Pass 1: gather real names + object IDs from PlayerSpawn. Each PlayerSpawn's
@@ -1067,6 +1186,17 @@ $dev("dev-prefill").addEventListener("click",()=>{
 $dev("devmenu").addEventListener("click",e=>{ if(e.target===$dev("devmenu")) closeDevMenu(); });
 document.addEventListener("keydown",e=>{ if(e.key==="Escape" && !$dev("devmenu").classList.contains("hidden")) closeDevMenu(); });
 
-/* Public API — the shell loads the file and feeds both modules. */
-window.Inspector = { load: loadBytes };
+/* Picking a patch by hand re-parses the file: the patch decides which opcode is
+   NpcSpawn, PlaceFieldMarker and so on, so the pull list and timeline have to be
+   rebuilt against it, not just the transpose. */
+document.getElementById("src-patch").addEventListener("change",e=>{
+  patchOverride=e.target.value||null;
+  if(!raw) return;
+  try{ loadBytes(fileName, raw.buffer.slice(0)); }
+  catch(err){ toast(err.message,true); }
+});
+
+/* Public API — the shell loads the file and feeds both modules. A fresh file
+   drops any hand-picked patch; the new one gets read from its own build. */
+window.Inspector = { load:(name,buffer)=>{ patchOverride=null; loadBytes(name,buffer); } };
 })();

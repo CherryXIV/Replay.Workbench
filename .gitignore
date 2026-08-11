@@ -1,9 +1,13 @@
 # FFXIV duty recordings - local test data, never publish
 *.dat
+.testfiles
 
 # Local dev-server / preview helper
 .claude/launch.json
 .claude
+
+# Python tooling
+__pycache__/
 
 # OS / editor cruft
 .DS_Store

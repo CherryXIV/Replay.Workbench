@@ -1,0 +1,28 @@
+{
+  "_comment": [
+    "Game build number -> patch version, for bump_replay.py.",
+    "The build is the int32 at offset 0x10 of an FFXIVREPLAY .dat, and is also",
+    "shown as 'game build' in the workbench inspector. FFXIVOpcodes' opcodes.json",
+    "does not carry build numbers, so this table is maintained by hand: record a",
+    "replay on a fresh patch, read its build, add a line here.",
+    "Keep in sync with BUILD_TO_PATCH / LATEST_GAME_BUILD in docs/opcodes.js.",
+    "",
+    "This is only a hint. bump_replay.py reads the patch out of the recording's",
+    "own opcodes and prefers that when it fits exactly, because a wrong entry",
+    "here does not fail loudly -- every packet still gets remapped, just onto the",
+    "wrong packet type. Run with a .dat and it will tell you if a line is wrong."
+  ],
+  "builds": {
+    "11307609": "7.16h",
+    "11992467": "7.25h3",
+    "12543445": "7.38",
+    "12779391": "7.40h2",
+    "12880681": "7.41",
+    "12924473": "7.41h",
+    "13474473": "7.51",
+    "13551374": "7.51h",
+    "13592030": "7.51h2",
+    "13733124": "7.55",
+    "13820768": "7.55h"
+  }
+}

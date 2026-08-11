@@ -254,6 +254,8 @@
 <div id="toast"></div>
 
 <script src="opcodes.js"></script>
+<script src="patchdiffs.js"></script>
+<script src="patchchain.js"></script>
 <script>
 "use strict";
 (function(){
@@ -271,7 +273,7 @@ const PORTRAIT_LEN=1408; // PartyPortraitInfo = 8 members * 176 bytes (see app.j
 /* ---- state ---- */
 let raw=null, dv=null, fileName="";
 let segs=[];                 // {offset,opcode,dataLength,ms,oid,payloadStart}
-let fileBuild=0, filePatch=null;
+let fileBuild=0, filePatch=null, patchDetected=null;
 let census=[];               // per-opcode aggregates (see buildCensus)
 let censusByOp=new Map();
 let partyNames=[];           // [{name, bytes:Uint8Array}]
@@ -292,15 +294,23 @@ function parse(buffer){
   raw=new Uint8Array(buffer); dv=new DataView(raw.buffer);
   for(let i=0;i<MAGIC.length;i++) if(raw[i]!==MAGIC[i]) throw new Error("Not an FFXIVREPLAY .dat (bad header).");
   fileBuild=i32(OFF_BUILD);
-  filePatch=(typeof BUILD_TO_PATCH!=="undefined" && BUILD_TO_PATCH[fileBuild])||null;
   const replayLength=i32(OFF_REPLAY_LEN);
   segs=[]; let off=0;
+  const hist=new Map();
   while(off<replayLength){
     const b=DATA_START+off;
     const opcode=u16(b), dataLength=u16(b+2), ms=u32(b+4), oid=u32(b+8);
     segs.push({offset:off,opcode,dataLength,ms,oid,payloadStart:b+SEG_HEADER});
+    hist.set(opcode,(hist.get(opcode)||0)+1);
     off+=SEG_HEADER+dataLength;
   }
+  /* Which patch this is comes from the file's own opcodes first (detectPatch in
+     patchchain.js), with the build number as a fallback. A wrong BUILD_TO_PATCH
+     entry doesn't fail loudly — it just labels every packet as the wrong thing —
+     and the recording's opcode set only fits the patch it was really made on. */
+  patchDetected=(typeof detectPatch==="function") ? detectPatch(hist) : null;
+  filePatch = (patchDetected && patchDetected.confident) ? patchDetected.patch
+    : ((typeof BUILD_TO_PATCH!=="undefined" && BUILD_TO_PATCH[fileBuild])||null);
   partyNames=findPlayerNames(replayLength);
   return {replayLength};
 }
@@ -443,9 +453,16 @@ function buildNameTableOptions(){
   const sel=document.getElementById("nametable");
   sel.innerHTML="";
   const opt=(v,t)=>{ const o=document.createElement("option"); o.value=v; o.textContent=t; sel.appendChild(o); };
-  const auto=filePatch?`Auto — build ${fileBuild} (${filePatch})`:`Auto — build ${fileBuild} (no table)`;
+  const how = (patchDetected && patchDetected.confident) ? "from opcodes" : "from build";
+  const auto=filePatch?`Auto — ${filePatch} (${how})`:`Auto — build ${fileBuild} (unidentified)`;
   opt("auto",auto);
-  if(typeof OPCODE_TABLES!=="undefined") for(const p of Object.keys(OPCODE_TABLES)) opt("patch:"+p,"Patch "+p);
+  // Every patch in the chain is offered, not just the few with a pasted-in name
+  // table: patchTable() carries the latest names backwards through the opcode
+  // diffs, so a 6.5 recording gets labelled as readably as a 7.5 one.
+  const patches=(typeof PATCH_CHAIN!=="undefined") ? PATCH_CHAIN.slice().reverse() : [];
+  for(const p of patches) opt("patch:"+p,"Patch "+p);
+  if(typeof OPCODE_TABLES!=="undefined")
+    for(const p of Object.keys(OPCODE_TABLES)) if(!patches.includes(p)) opt("patch:"+p,"Patch "+p);
   opt("paste","Paste a table…");
   opt("none","None (raw opcodes)");
   sel.value="auto";
@@ -454,8 +471,8 @@ function activeTableObj(){
   const v=document.getElementById("nametable").value;
   if(v==="none") return null;
   if(v==="paste") return customTable;
-  if(v==="auto") return (filePatch && typeof OPCODE_TABLES!=="undefined")?OPCODE_TABLES[filePatch]:null;
-  if(v.startsWith("patch:")) return OPCODE_TABLES[v.slice(6)];
+  if(v==="auto") return filePatch?patchTable(filePatch):null;
+  if(v.startsWith("patch:")) return patchTable(v.slice(6));
   return null;
 }
 function rebuildNameMap(){
@@ -639,7 +656,9 @@ function fmtBytes(n){ return n<1024?`${n} B`:n<1048576?`${(n/1024).toFixed(0)} K
 
 function renderHeader(){
   const ts=u32(OFF_TIMESTAMP);
-  const known = filePatch ? `${fileBuild} (${filePatch})` : `${fileBuild} (unknown)`;
+  const known = filePatch
+    ? `${fileBuild} (${filePatch}${(patchDetected&&patchDetected.confident)?"":", from build table"})`
+    : `${fileBuild} (unknown)`;
   const cells=[
     ["format version",u16(OFF_VERSION),""],
     ["game build",known,filePatch?"cyan":"amber"],
@@ -702,8 +721,9 @@ function renderFinder(){
     const nm=nameFor(e.op);
     return `<span class="pick" data-open="${e.op}">${e.op} <span style="color:var(--ink-faint)">(${ev.join("/")}${nm?" · "+esc(nm):""})</span></span>`;
   }).join(", ")}</div>`);
-  if(filePatch && typeof OPCODE_TABLES!=="undefined"){
-    const t=OPCODE_TABLES[filePatch];
+  const patchT=filePatch?patchTable(filePatch):null;
+  if(patchT){
+    const t=patchT;
     altParts.push(`<div style="margin-top:6px;color:var(--ink-faint)">This build's table already records PartyList=<b style="color:var(--ink-dim)">${t.PartyList}</b>, PartyPortraitInfo=<b style="color:var(--ink-dim)">${t.PartyPortraitInfo}</b> — use the finder to verify them on a fresh patch.</div>`);
   }
   document.getElementById("finder-alt").innerHTML=altParts.join("");
