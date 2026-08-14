@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <RootNamespace>ReplayWorkbench.Updater</RootNamespace>
+    <AssemblyName>Replay.Workbench.Updater.Core</AssemblyName>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+  <!-- Deliberately no reference to programs/Replay.Workbench.Core: this library
+       triggers a rebuild of that solution, and holding its assembly would lock
+       the very files MSBuild is trying to overwrite. Post-update validation runs
+       as a child process instead (Replay.Workbench.Verify). -->
+
+</Project>

@@ -3,6 +3,11 @@
 Pull the latest FFXIV Global ServerZoneIpcType opcodes from karashiiro/FFXIVOpcodes
 and print them as an OPCODE_TABLES entry ready to paste into docs/opcodes.js.
 
+For a normal patch day use tools/update_patch.py instead: it derives the table
+from opcodediff's diff (which lands sooner, keeps this repo's hand-corrections,
+and needs no paste step) and writes every file that has to change. This script
+is the manual fallback for when there is no diff yet.
+
 Usage:
     python tools/update_opcodes.py
 

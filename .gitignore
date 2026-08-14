@@ -9,6 +9,16 @@
 # Python tooling
 __pycache__/
 
+# .NET build output (programs/Replay.Workbench.Core/Data/*.json is generated but
+# checked in - it is what the embedded resources are built from)
+[Bb]in/
+[Oo]bj/
+.vs/
+*.user
+
+# opcodediff mirror filled by tools/update_patch.py - upstream data, re-fetchable
+tools/diffs/
+
 # OS / editor cruft
 .DS_Store
 Thumbs.db

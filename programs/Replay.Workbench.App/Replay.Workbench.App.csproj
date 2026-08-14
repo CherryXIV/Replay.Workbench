@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <RootNamespace>ReplayWorkbench.App</RootNamespace>
+    <AssemblyName>Replay.Workbench</AssemblyName>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <ApplicationUseCompatibleTextRendering>false</ApplicationUseCompatibleTextRendering>
+    <ApplicationVisualStyles>true</ApplicationVisualStyles>
+    <!-- WFO5001: Application.SetColorMode is still flagged "evaluation only". We opt
+         in deliberately - it is what darkens the title bar, scrollbars and dialogs
+         that WinForms paints itself. Drop the call, not the suppression, if it goes. -->
+    <NoWarn>$(NoWarn);WFO5001</NoWarn>
+    <!-- Single self-contained exe is the point of the desktop build; publish with
+         `dotnet publish -c Release -r win-x64` for one file with no runtime install. -->
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>false</SelfContained>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Replay.Workbench.Core\Replay.Workbench.Core.csproj" />
+  </ItemGroup>
+
+</Project>

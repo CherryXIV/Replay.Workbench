@@ -23,15 +23,21 @@
    recording gets the same labels as a 7.5 one. An entry left as {} (a build
    registered before anyone pasted its names) falls through to that derivation.
 
-   To add a patch on the next game update:
+   To add a patch on the next game update, run:
+     python tools/update_patch.py --from-replay "a recording on the new patch.dat"
+   which pulls the new diff from opcodediff, extends the patch chain, derives
+   this file's new name table by carrying the one below it forward through that
+   diff, and sets BUILD_TO_PATCH / LATEST_PATCH / LATEST_GAME_BUILD. Run it
+   without a build number the day the diff lands and again with one once you
+   have a recording; it is idempotent either way. What it does by hand is:
      1. add a "build: patch" line to BUILD_TO_PATCH so the build is recognised,
      2. bump LATEST_PATCH and LATEST_GAME_BUILD,
-     3. paste its ServerZoneIpcType list as a new OPCODE_TABLES entry,
+     3. add its ServerZoneIpcType list as a new OPCODE_TABLES entry,
      4. re-run tools/build_patchdiffs.py once opcodediff has the new diff, and
         add the patch to VERSION_CHAIN in tools/bump_replay.py.
-   Between 2 and 4 there's no diff for the new patch yet, so transpose falls
-   back to matching IPC names between the two tables — which is why step 3 still
-   matters, and why the dev menu still takes a pasted table.
+   Before the diff exists there's nothing to carry names through, so transpose
+   falls back to matching IPC names between the two tables — which is why step 3
+   still matters, and why the dev menu still takes a pasted table.
    ===================================================================== */
 
 /* The current client build. A replay only loads if its build matches the running
