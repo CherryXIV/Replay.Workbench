@@ -742,12 +742,7 @@ function renderPatchControls(){
   const tCheck=document.getElementById("transpose-check"), tBox=document.getElementById("transpose"),
         tSub=document.getElementById("transpose-sub");
   const enable=(on)=>{ tCheck.classList.toggle("disabled",!on); tBox.disabled=!on; if(!on) tBox.checked=false; };
-  // Work out the resizing up front: every path below returns, and the InitZone
-  // control has to be hidden again on a file that doesn't need it, not just shown
-  // on one that does.
   const old=oldSizedPackets();
-  const izWrap=document.getElementById("initzone-wrap");
-  if(izWrap) izWrap.classList.toggle("hidden", !old.has("InitZone"));
   if(!filePatch){
     enable(false);
     tSub.textContent = det
@@ -777,10 +772,12 @@ function renderPatchControls(){
   if(old.size){
     msg += ` · also resizing ${old.size} packet type${old.size===1?"":"s"} (` +
            [...old.entries()].sort().map(([n,sz])=>`${n} ${sz}→${MIGRATE_TARGET[n]}`).join(", ") + ")";
+    // InitZone can't be resized by splicing (it drops bytes as well as adding
+    // them), and rebuilding it needs a template recording to copy a working one
+    // from. That lives in the desktop app, which is where this kind of fine-tuning
+    // belongs; here the packet is passed through untouched and said so.
     if(old.has("InitZone"))
-      msg += initZoneTemplate
-        ? ` · InitZone rebuilt from ${initZoneTemplateFrom}`
-        : " · InitZone needs a template recording below, or this will not load";
+      msg += " · InitZone is left as-is - rebuilding it needs the desktop app";
   }
   tSub.textContent=msg;
 }
@@ -874,7 +871,8 @@ const MIGRATE_TARGET={PlayerSpawn:664, NpcSpawn:656, ActorControlSelf:40, Countd
                     rather than left zero.
 
    InitZone is deliberately absent — it DELETES 8 bytes as well as adding 32, so
-   no splice can express it. It is rebuilt from a template instead. */
+   no splice can express it. Rebuilding it needs a working payload to copy from,
+   which is a desktop-app job; here it is passed through and reported. */
 const MIGRATIONS=[
   {packet:"PlayerSpawn",      from:656, to:664, inserts:[[126,2],[157,2]]}, // remaining 4 pad the tail
   {packet:"NpcSpawn",         from:648, to:656, inserts:[[124,2],[148,2]]}, // remaining 4 pad the tail
@@ -894,24 +892,6 @@ function migrateOnePayload(m, payload){
   }
   const rest=Math.min(payload.length-read, m.to-write);
   if(rest>0) out.set(payload.subarray(read,read+rest), write);
-  return out;
-}
-
-// InitZone's recording-specific fields; everything else is constant across
-// current samples or always zero, so it can come from a template. +0x06 is
-// confirmed — it equals the header's content id in every recording checked.
-const IZ_IDENT=[[0x00,2],[0x02,2],[0x04,2],[0x06,2],[0x10,1],[0x13,1]];
-const IZ_OLD_POS=0x50, IZ_NEW_POS=0x68, IZ_POS_N=12;
-
-/* Rebuild an InitZone against a working one: start from a payload the live client
-   already accepted and overwrite only the fields that identify this recording.
-   Going this direction removes the guess — anything unidentified keeps a value
-   known to work rather than one we invented. */
-function rebuildInitZone(old, template){
-  const out=template.slice();
-  for(const [at,len] of IZ_IDENT) if(at+len<=old.length) out.set(old.subarray(at,at+len), at);
-  const from = old.length===MIGRATE_TARGET.InitZone ? IZ_NEW_POS : IZ_OLD_POS;
-  if(from+IZ_POS_N<=old.length) out.set(old.subarray(from,from+IZ_POS_N), IZ_NEW_POS);
   return out;
 }
 
@@ -951,10 +931,10 @@ function oldSizedPackets(){
    replay length, and every chapter offset, which points into the data stream and
    so moves by however many bytes grew before it.
 
-   Without a template the InitZone is left alone and reported, because a rebuilt
-   guess is worse than a clearly-stated gap. Returns {bytes, note}: a NEW array
-   when anything was resized, else the original. */
-function migratePayloads(bytes, template){
+   The InitZone is left alone and reported: it can't be spliced, and rebuilding it
+   from a template recording is a desktop-app job. Returns {bytes, note}: a NEW
+   array when anything was resized, else the original. */
+function migratePayloads(bytes){
   const t=patchTable(filePatch);
   if(!t) return {bytes, note:""};
   const opToName=new Map();
@@ -975,8 +955,7 @@ function migratePayloads(bytes, template){
     let resized=null;
     if(name!=null && len!==MIGRATE_TARGET[name]){
       if(name==="InitZone"){
-        if(template) resized=rebuildInitZone(payload,template);
-        else blocked.add(`InitZone is ${len} bytes and needs a template recording to rebuild from`);
+        blocked.add(`InitZone is ${len} bytes - rebuilding it needs the desktop app`);
       } else {
         const m=MIGRATIONS.find(x=>x.packet===name && x.from===len);
         if(m){
@@ -1026,50 +1005,12 @@ function migratePayloads(bytes, template){
   return {bytes:out, note};
 }
 
-/* Lift an InitZone payload out of a recording already on the current layout.
-   Prefer the SAME duty: InitZone carries the territory, the content id and the
-   arena spawn position, so a same-duty template needs almost nothing
-   transplanted into it. The template need not be on the latest patch, only new
-   enough to already be the target size — its opcode is resolved in whatever
-   patch it actually is. Returns {payload} or {error}. */
-function readInitZoneTemplate(buffer){
-  const b=new Uint8Array(buffer), dv=new DataView(buffer);
-  for(let i=0;i<MAGIC.length;i++) if(b[i]!==MAGIC[i]) return {error:"not an FFXIVREPLAY .dat"};
-  const replayLen=dv.getInt32(OFF_REPLAY_LEN,true);
-  const hist=new Map();
-  let off=0;
-  while(off<replayLen && DATA_START+off+SEG_HEADER<=b.length){
-    const at=DATA_START+off, op=dv.getUint16(at,true);
-    hist.set(op,(hist.get(op)||0)+1);
-    off+=SEG_HEADER+dv.getUint16(at+2,true);
-  }
-  const det=detectPatch(hist,LATEST_PATCH);
-  const patch=(det&&det.confident) ? det.patch : BUILD_TO_PATCH[dv.getInt32(OFF_BUILD,true)];
-  const t=patch ? patchTable(patch) : null;
-  if(!t||t.InitZone==null) return {error:`can't tell what patch that recording is on (closest ${det?det.patch:"none"})`};
-  const want=MIGRATE_TARGET.InitZone;
-  off=0;
-  while(off<replayLen && DATA_START+off+SEG_HEADER<=b.length){
-    const at=DATA_START+off, op=dv.getUint16(at,true), len=dv.getUint16(at+2,true);
-    if(op===t.InitZone){
-      if(len!==want) return {error:`that recording reads as ${patch} and its InitZone is ${len} bytes, not ${want} — the template has to be recent enough to already be on the current layout`};
-      return {payload:b.slice(at+SEG_HEADER,at+SEG_HEADER+want), patch};
-    }
-    off+=SEG_HEADER+len;
-  }
-  return {error:"no InitZone packet in that recording"};
-}
-
-// An InitZone payload from a current-layout recording, for rebuilding an old one.
-// Set from the export panel; kept for the life of the page.
-let initZoneTemplate=null, initZoneTemplateFrom=null;
-
 /* Resize old packets, then remap opcodes — the two halves of "make this load on
    the current patch". Returns {bytes, note}: a NEW array when anything grew. */
 function applyPatchUpgradeIfChecked(bytes){
   const box=document.getElementById("transpose");
   if(box.disabled || !box.checked) return {bytes, note:""};
-  const m=migratePayloads(bytes, initZoneTemplate);
+  const m=migratePayloads(bytes);
   return {bytes:m.bytes, note:m.note+applyTransposeIfChecked(m.bytes)};
 }
 
@@ -1389,25 +1330,6 @@ document.getElementById("btn-split").addEventListener("click",async()=>{
     const base=fileName.replace(/\.dat$/i,"");
     const saved=await download(bytes,`pull${pulls[selectedPull].n}_${base}.dat`);
     if(saved) toast(`Exported pull ${pulls[selectedPull].n} (${fmtBytes(bytes.length)})${note}${ghosts}.`);
-  }catch(err){ toast(err.message,true); }
-});
-
-const IZ_HINT="A recent recording to copy a working InitZone from — same duty is best";
-document.getElementById("initzone-template").addEventListener("change",async(e)=>{
-  const f=e.target.files && e.target.files[0];
-  if(!f) return;
-  try{
-    const r=readInitZoneTemplate(await f.arrayBuffer());
-    if(r.error){
-      initZoneTemplate=null; initZoneTemplateFrom=null;
-      toast(r.error,true);
-    }else{
-      initZoneTemplate=r.payload; initZoneTemplateFrom=f.name;
-      toast(`InitZone template set from ${f.name} (${r.patch}).`);
-    }
-    document.getElementById("initzone-sub").textContent =
-      initZoneTemplate ? `Using ${initZoneTemplateFrom}` : IZ_HINT;
-    if(segs.length) renderPatchControls();
   }catch(err){ toast(err.message,true); }
 });
 
