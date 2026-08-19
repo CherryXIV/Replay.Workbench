@@ -22,7 +22,7 @@ public sealed record CustomizeField(int Index, string Name, CustomizeKind Kind, 
 /// The 26-byte character customize block, as it appears identically in both the
 /// PlayerSpawn payload and each party-portrait member block.
 ///
-/// <para>Colour bytes are palette <i>indices</i> into tables that live in the
+/// <para>color bytes are palette <i>indices</i> into tables that live in the
 /// game's own data files, which this tool has no access to. They are therefore
 /// editable as numbers only: there is no way to render a faithful swatch without
 /// reading the client's chara-make data, and a made-up swatch would be worse than
@@ -83,24 +83,24 @@ public sealed class Customize
         new CustomizeField(5, "Face", CustomizeKind.Number, "face index for this clan"),
         new CustomizeField(6, "Hairstyle", CustomizeKind.Number, "hair index for this clan/gender"),
         new CustomizeField(7, "Highlights", CustomizeKind.Number, "0 = off, 128 = on"),
-        new CustomizeField(8, "Skin colour", CustomizeKind.Color),
-        new CustomizeField(9, "Eye colour (right)", CustomizeKind.Color, "differs from left only with heterochromia"),
-        new CustomizeField(10, "Hair colour", CustomizeKind.Color),
-        new CustomizeField(11, "Highlight colour", CustomizeKind.Color),
+        new CustomizeField(8, "Skin color", CustomizeKind.Color),
+        new CustomizeField(9, "Eye color (right)", CustomizeKind.Color, "differs from left only with heterochromia"),
+        new CustomizeField(10, "Hair color", CustomizeKind.Color),
+        new CustomizeField(11, "Highlight color", CustomizeKind.Color),
         new CustomizeField(12, "Facial features", CustomizeKind.Mask, "bitmask; bit 7 is the legacy tattoo"),
-        new CustomizeField(13, "Feature colour", CustomizeKind.Color),
+        new CustomizeField(13, "Feature color", CustomizeKind.Color),
         new CustomizeField(14, "Eyebrows", CustomizeKind.Number),
-        new CustomizeField(15, "Eye colour (left)", CustomizeKind.Color),
+        new CustomizeField(15, "Eye color (left)", CustomizeKind.Color),
         new CustomizeField(16, "Eye shape", CustomizeKind.Number, "bit 7 = small iris"),
         new CustomizeField(17, "Nose", CustomizeKind.Number),
         new CustomizeField(18, "Jaw", CustomizeKind.Number),
-        new CustomizeField(19, "Mouth", CustomizeKind.Number, "bit 7 = lip colour on"),
-        new CustomizeField(20, "Lip colour", CustomizeKind.Color),
+        new CustomizeField(19, "Mouth", CustomizeKind.Number, "bit 7 = lip color on"),
+        new CustomizeField(20, "Lip color", CustomizeKind.Color),
         new CustomizeField(21, "Muscle / tail size", CustomizeKind.Number, "race feature size, 0-100"),
         new CustomizeField(22, "Tail / ear shape", CustomizeKind.Number, "race feature type"),
         new CustomizeField(23, "Bust size", CustomizeKind.Number, "0-100"),
         new CustomizeField(24, "Face paint", CustomizeKind.Number, "bit 7 = mirrored"),
-        new CustomizeField(25, "Face paint colour", CustomizeKind.Color),
+        new CustomizeField(25, "Face paint color", CustomizeKind.Color),
     };
 
     public static readonly (byte Id, string Name)[] Races =

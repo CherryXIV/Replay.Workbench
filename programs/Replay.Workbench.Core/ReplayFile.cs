@@ -37,6 +37,19 @@ public sealed class ReplayFile
     /// <summary>Opcode to how many segments carry it.</summary>
     public IReadOnlyDictionary<int, int> Histogram { get; }
 
+    /// <summary>
+    /// The payload length of this file's PlayerSpawn packets, when it is a size no
+    /// <see cref="SpawnLayout"/> covers - otherwise null.
+    ///
+    /// <para>This is the failure worth saying out loud.  A patch that moves the
+    /// spawn fields again lands here, and everything that reads a character goes
+    /// quiet at once: no roster, an empty appearance editor, and an anonymize pass
+    /// that reports success while leaving every real name in the file.  Silence
+    /// looks like "this recording has no players", so the caller should say what
+    /// actually happened instead.</para>
+    /// </summary>
+    public int? UnknownSpawnLength { get; }
+
     private ReplayFile(byte[] raw, string fileName, string? patchOverride)
     {
         Raw = raw;
@@ -110,8 +123,28 @@ public sealed class ReplayFile
         }
         Chapters = chapters;
 
+        UnknownSpawnLength = FindUnknownSpawnLength();
         Pulls = BuildPulls();
         Players = FindPlayers(replayLength);
+    }
+
+    /// <summary>
+    /// The size of this file's PlayerSpawn packets when no layout matches it.  Any
+    /// one packet we can read means the file is fine, so this only answers when
+    /// none of them resolve.
+    /// </summary>
+    private int? FindUnknownSpawnLength()
+    {
+        var spawnOp = PatchChain.Lookup(FilePatch, "PlayerSpawn");
+        if (spawnOp is null) return null;
+        int? unknown = null;
+        foreach (var seg in Segments)
+        {
+            if (seg.Opcode != spawnOp) continue;
+            if (CharacterLayout.SpawnLayoutFor(seg.DataLength) is not null) return null;
+            unknown ??= seg.DataLength;
+        }
+        return unknown;
     }
 
     public static ReplayFile Parse(byte[] bytes, string fileName, string? patchOverride = null) =>
@@ -305,13 +338,28 @@ public sealed class ReplayFile
     public bool HasWaymarks() => Segments.Any(s =>
         (s.Opcode == WaymarkPresetOpcode && !IsEmptyPreset(s)) || s.Opcode == WaymarkOpcode);
 
+    /// <summary>
+    /// Everyone in the recording, in the order it introduces them.
+    ///
+    /// <para>The roster is one row per <i>character</i> the PlayerSpawn packets
+    /// describe, keyed on the character key, not on the name text.  Two people can
+    /// carry the same name - cross-world parties allow it outright, and an
+    /// anonymize pass that numbered people by name used to produce it - and keying
+    /// on the text drops everyone after the first.</para>
+    ///
+    /// <para>The byte scan still runs on top, because it is what finds a name's
+    /// <i>other</i> occurrences, which is what a rename has to rewrite, and it
+    /// picks up names no spawn packet describes.</para>
+    /// </summary>
     private List<PlayerName> FindPlayers(int replayLength)
     {
+        var limit = Math.Min(Raw.Length, ReplayFormat.DataStart + replayLength);
+        var spawned = SpawnedCharacters(limit);
+        var spawnNames = new HashSet<string>(spawned.Select(c => c.Name), StringComparer.Ordinal);
+        var spawnFields = new HashSet<int>(spawned.SelectMany(c => c.Fields));
+
         // a 32-byte field: "First Last\0" + null padding, two cap-initial parts
         var found = new Dictionary<string, List<int>>(StringComparer.Ordinal);
-        var order = new List<string>();
-        var limit = Math.Min(Raw.Length, ReplayFormat.DataStart + replayLength);
-
         for (var i = 0; i + 32 <= limit; i++)
         {
             if (!IsUpper(Raw[i])) continue;
@@ -323,22 +371,79 @@ public sealed class ReplayFile
                 if (Raw[i + j] != 0) { padded = false; break; }
             if (!padded) continue;
             var s = Encoding.UTF8.GetString(Raw, i, len);
-            if (!LooksLikeName(s)) continue;
-            if (!found.TryGetValue(s, out var offsets))
-            {
-                found[s] = offsets = new List<int>();
-                order.Add(s);
-            }
+            // A name a spawn packet vouches for is a name whatever it looks like;
+            // the shape test only has to answer for the rest.
+            if (!spawnNames.Contains(s) && !LooksLikeName(s)) continue;
+            if (!found.TryGetValue(s, out var offsets)) found[s] = offsets = new List<int>();
             offsets.Add(i);
         }
 
-        return order.Select(name => new PlayerName { Name = name, Offsets = found[name] }).ToList();
+        var rows = new List<(int At, PlayerName Player)>();
+        foreach (var c in spawned)
+        {
+            var offsets = new List<int>(c.Fields);
+            // An occurrence outside a spawn name field cannot be pinned to one
+            // character, so everyone carrying that name gets it and a rename still
+            // clears the name everywhere the file writes it.  Where the name is
+            // unique - which is every recording the game itself produced - that is
+            // simply all of its occurrences.
+            if (found.TryGetValue(c.Name, out var all))
+                offsets.AddRange(all.Where(at => !spawnFields.Contains(at)));
+            offsets.Sort();
+            rows.Add((c.Fields[0],
+                new PlayerName { Name = c.Name, CharacterKey = c.Key, Offsets = offsets }));
+        }
+
+        // Names no spawn packet describes still belong on the list.
+        foreach (var (name, offsets) in found.Where(kv => !spawnNames.Contains(kv.Key)))
+            rows.Add((offsets[0], new PlayerName { Name = name, Offsets = offsets }));
+
+        return rows.OrderBy(r => r.At).Select(r => r.Player).ToList();
 
         static bool IsUpper(byte b) => b is >= 65 and <= 90;
         // digits are allowed so the scanner reads our own anonymized "Player N"
         // fields to the end; LooksLikeName still gates what counts as a name.
         static bool IsNameChar(byte b) =>
             b is >= 65 and <= 90 or >= 97 and <= 122 or >= 48 and <= 57 or 32 or 39 or 45;
+    }
+
+    /// <summary>
+    /// Every character with a PlayerSpawn packet, first-seen order, with the offsets
+    /// of that character's own name fields.
+    /// </summary>
+    private List<(ulong Key, string Name, List<int> Fields)> SpawnedCharacters(int limit)
+    {
+        var order = new List<(ulong Key, string Name, List<int> Fields)>();
+        var spawnOp = PatchChain.Lookup(FilePatch, "PlayerSpawn");
+        if (spawnOp is null) return order;
+
+        var byKey = new Dictionary<ulong, int>();
+        foreach (var seg in Segments)
+        {
+            if (seg.Opcode != spawnOp) continue;
+            // The packet states its own size, and that is what says where the
+            // fields are; an unrecognised size is one we have no offsets for.
+            var lay = CharacterLayout.SpawnLayoutFor(seg.DataLength);
+            if (lay is null) continue;
+            var p = SegPayload(seg);
+            var at = p + lay.Name;
+            if (at + CharacterLayout.NameBytes > limit) continue;
+            var end = at;
+            while (end < at + CharacterLayout.NameBytes && Raw[end] != 0) end++;
+            if (end == at) continue; // no name, nobody to list
+            var key = BinaryPrimitives.ReadUInt64LittleEndian(Raw.AsSpan(p + lay.CharacterKey));
+            var name = Encoding.UTF8.GetString(Raw, at, end - at);
+
+            // A key of 0 says nothing about who this is, so those fall back to the
+            // name - one row per distinct one, as before.
+            var slot = key != 0
+                ? byKey.TryGetValue(key, out var k) ? k : -1
+                : order.FindIndex(o => o.Key == 0 && o.Name == name);
+            if (slot >= 0) { order[slot].Fields.Add(at); continue; }
+            if (key != 0) byKey[key] = order.Count;
+            order.Add((key, name, new List<int> { at }));
+        }
+        return order;
     }
 
     internal static bool LooksLikeName(string s)

@@ -4,7 +4,7 @@ namespace ReplayWorkbench.App;
 
 /// <summary>
 /// Per-character appearance editor: the customize block, gear and dyes, weapons,
-/// facewear and the display toggles, for one player in the recording.
+/// facewear, title, worlds and the display toggles, for one player in the recording.
 /// </summary>
 internal sealed class CharacterForm : Form
 {
@@ -18,6 +18,9 @@ internal sealed class CharacterForm : Form
     private readonly NumericUpDown[,] _gear = new NumericUpDown[CharacterLayout.GearSlots, 5];
     private readonly NumericUpDown[,] _weapon = new NumericUpDown[2, 4];
     private readonly NumericUpDown _facewear = new();
+    private readonly NumericUpDown _title = new();
+    private readonly NumericUpDown _curWorld = new();
+    private readonly NumericUpDown _homeWorld = new();
     private readonly CheckBox _hideHead = new() { Text = "Hide headgear" };
     private readonly CheckBox _hideWeapon = new() { Text = "Hide weapon" };
 
@@ -253,7 +256,7 @@ internal sealed class CharacterForm : Form
 
         var note = new Label
         {
-            Text = "Colours are palette indices from the game's own data files, not RGB,\n" +
+            Text = "colors are palette indices from the game's own data files, not RGB,\n" +
                    "so they can only be edited as numbers here.",
             Font = Theme.MonoSmall, ForeColor = Theme.InkFaint, UseMnemonic = false,
             AutoSize = false, Width = colW * 2 - 8, Height = Theme.MonoSmall.Height * 2 + 8,
@@ -285,7 +288,7 @@ internal sealed class CharacterForm : Form
 
         var rowH = Theme.Mono.Height + 12;
         var labelW = CharacterLayout.GearSlotNames
-            .Concat(new[] { "Main hand", "Facewear" })
+            .Concat(new[] { "Main hand", "Facewear", "Title", "Current world", "Home world" })
             .Max(s => TextRenderer.MeasureText(s, Theme.MonoSmall).Width) + 10;
         int[] widths =
         {
@@ -358,6 +361,33 @@ internal sealed class CharacterForm : Form
         _facewear.SetBounds(14 + labelW, y, widths[0], rowH - 4);
         _tips.SetToolTip(_facewear, "Glasses / facewear model id. 0 = none.");
         host.Controls.Add(_facewear);
+        y += rowH;
+
+        host.Controls.Add(SlotLabel("Title", y, labelW, rowH));
+        StyleSpinner(_title, 65535);
+        _title.SetBounds(14 + labelW, y, widths[0], rowH - 4);
+        _tips.SetToolTip(_title,
+            "The title shown under the character's name, as a row id in the game's " +
+            "Title sheet. 0 = no title. Anonymizing clears it.");
+        host.Controls.Add(_title);
+        y += rowH;
+
+        host.Controls.Add(SlotLabel("Current world", y, labelW, rowH));
+        StyleSpinner(_curWorld, 65535);
+        _curWorld.SetBounds(14 + labelW, y, widths[0], rowH - 4);
+        _tips.SetToolTip(_curWorld,
+            "The world this character is logged in on. Differs from the home world " +
+            "only for someone who has travelled to another world.");
+        host.Controls.Add(_curWorld);
+        y += rowH;
+
+        host.Controls.Add(SlotLabel("Home world", y, labelW, rowH));
+        StyleSpinner(_homeWorld, 65535);
+        _homeWorld.SetBounds(14 + labelW, y, widths[0], rowH - 4);
+        _tips.SetToolTip(_homeWorld,
+            "The world this character belongs to. Written to the spawn packet and to " +
+            "the party roster, which keeps its own copy.");
+        host.Controls.Add(_homeWorld);
         y += rowH + 8;
 
         foreach (var (box, tip) in new[]
@@ -518,6 +548,9 @@ internal sealed class CharacterForm : Form
         LoadWeapon(0, a.MainHand);
         LoadWeapon(1, a.OffHand);
         _facewear.Value = a.Facewear;
+        _title.Value = a.Title;
+        _curWorld.Value = a.CurrentWorld;
+        _homeWorld.Value = a.HomeWorld;
         _hideHead.Checked = a.HideHeadgear;
         _hideWeapon.Checked = a.HideWeapon;
 
@@ -574,6 +607,9 @@ internal sealed class CharacterForm : Form
             MainHand = ReadWeapon(0),
             OffHand = ReadWeapon(1),
             Facewear = (ushort)_facewear.Value,
+            Title = (ushort)_title.Value,
+            CurrentWorld = (ushort)_curWorld.Value,
+            HomeWorld = (ushort)_homeWorld.Value,
             HideHeadgear = _hideHead.Checked,
             HideWeapon = _hideWeapon.Checked,
         };

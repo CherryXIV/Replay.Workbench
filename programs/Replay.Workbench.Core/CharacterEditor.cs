@@ -45,6 +45,18 @@ public sealed class CharacterAppearance
     public required WeaponPiece MainHand { get; set; }
     public required WeaponPiece OffHand { get; set; }
     public ushort Facewear { get; set; }
+
+    /// <summary>Title sheet row id; 0 = no title.  Lives in the spawn packet only -
+    /// the party portrait has no title field.</summary>
+    public ushort Title { get; set; }
+
+    /// <summary>The world the character is logged in on.  Spawn packet only.</summary>
+    public ushort CurrentWorld { get; set; }
+
+    /// <summary>The world the character belongs to.  Written to the spawn packet and
+    /// to the PartyList roster, which carries its own copy.</summary>
+    public ushort HomeWorld { get; set; }
+
     public bool HideHeadgear { get; set; }
     public bool HideWeapon { get; set; }
 
@@ -55,6 +67,9 @@ public sealed class CharacterAppearance
         MainHand = MainHand.Clone(),
         OffHand = OffHand.Clone(),
         Facewear = Facewear,
+        Title = Title,
+        CurrentWorld = CurrentWorld,
+        HomeWorld = HomeWorld,
         HideHeadgear = HideHeadgear,
         HideWeapon = HideWeapon,
     };
@@ -64,7 +79,9 @@ public sealed class CharacterAppearance
         Gear.Length == o.Gear.Length &&
         !Gear.Where((g, i) => !g.SameAs(o.Gear[i])).Any() &&
         MainHand.SameAs(o.MainHand) && OffHand.SameAs(o.OffHand) &&
-        Facewear == o.Facewear && HideHeadgear == o.HideHeadgear && HideWeapon == o.HideWeapon;
+        Facewear == o.Facewear && Title == o.Title &&
+        CurrentWorld == o.CurrentWorld && HomeWorld == o.HomeWorld &&
+        HideHeadgear == o.HideHeadgear && HideWeapon == o.HideWeapon;
 
     /// <summary>Dress in a job's artifact gear, the same set the anonymizer uses.</summary>
     public void ApplyJobGear(JobGear g)
@@ -123,7 +140,9 @@ public sealed class CharacterRecord
 /// <para>Identity lives in two packets and they store gear differently, so an
 /// edit is split: the customize block, facewear and both dye channels are written
 /// to <b>both</b> (byte-identical layouts, verified against real recordings),
-/// gear models and weapons go to the PlayerSpawn only, and the portrait's item
+/// gear models and weapons go to the PlayerSpawn only - as are the title and the
+/// current world, which no other packet carries - the home world additionally goes
+/// to the PartyList roster, and the portrait's item
 /// ids are edited as their own field. There is no model-to-item mapping without
 /// the game's data files, so the two cannot be kept in sync automatically.</para>
 /// </summary>
@@ -142,10 +161,12 @@ public static class CharacterEditor
 
         foreach (var seg in file.Segments)
         {
-            if (seg.Opcode != spawnOp || seg.DataLength != CharacterLayout.SpawnLength) continue;
+            if (seg.Opcode != spawnOp) continue;
+            var lay = CharacterLayout.SpawnLayoutFor(seg.DataLength);
+            if (lay is null) continue;
             var p = file.SegPayload(seg);
-            if (p + CharacterLayout.SpawnLength > raw.Length) continue;
-            var cid = BinaryPrimitives.ReadUInt64LittleEndian(span[(p + CharacterLayout.SpawnCharacterKey)..]);
+            if (p + lay.Length > raw.Length) continue;
+            var cid = BinaryPrimitives.ReadUInt64LittleEndian(span[(p + lay.CharacterKey)..]);
             if (cid == 0) continue;
 
             if (found.TryGetValue(cid, out var prev))
@@ -154,8 +175,8 @@ public static class CharacterEditor
                 continue;
             }
             order.Add(cid);
-            found[cid] = (ReadName(raw, p + CharacterLayout.SpawnName), raw[p + CharacterLayout.SpawnJob],
-                ReadSpawn(span, p), 1);
+            found[cid] = (ReadName(raw, p + lay.Name), raw[p + lay.Job],
+                ReadSpawn(span, p, lay), 1);
         }
 
         // Portrait blocks: gear item ids, and how many blocks each character is in.
@@ -200,28 +221,31 @@ public static class CharacterEditor
         return Encoding.UTF8.GetString(raw, at, end - at);
     }
 
-    private static CharacterAppearance ReadSpawn(ReadOnlySpan<byte> span, int p)
+    private static CharacterAppearance ReadSpawn(ReadOnlySpan<byte> span, int p, SpawnLayout lay)
     {
         var gear = new GearPiece[CharacterLayout.GearSlots];
         for (var s = 0; s < gear.Length; s++)
         {
-            var at = p + CharacterLayout.SpawnGear + s * 4;
+            var at = p + lay.Gear + s * 4;
             gear[s] = new GearPiece
             {
                 Model = BinaryPrimitives.ReadUInt16LittleEndian(span[at..]),
                 Variant = span[at + 2],
                 Dye1 = span[at + 3],
-                Dye2 = span[p + CharacterLayout.SpawnDye2 + s],
+                Dye2 = span[p + lay.Dye2 + s],
             };
         }
-        var flags = BinaryPrimitives.ReadUInt16LittleEndian(span[(p + CharacterLayout.SpawnDisplay)..]);
+        var flags = BinaryPrimitives.ReadUInt16LittleEndian(span[(p + lay.Display)..]);
         return new CharacterAppearance
         {
-            Customize = new Customize(span.Slice(p + CharacterLayout.SpawnCustomize, Customize.Length)),
+            Customize = new Customize(span.Slice(p + lay.Customize, Customize.Length)),
             Gear = gear,
-            MainHand = ReadWeapon(span, p + CharacterLayout.SpawnWeapon),
-            OffHand = ReadWeapon(span, p + CharacterLayout.SpawnWeaponSub),
-            Facewear = BinaryPrimitives.ReadUInt16LittleEndian(span[(p + CharacterLayout.SpawnFacewear)..]),
+            MainHand = ReadWeapon(span, p + lay.Weapon),
+            OffHand = ReadWeapon(span, p + lay.WeaponSub),
+            Facewear = BinaryPrimitives.ReadUInt16LittleEndian(span[(p + lay.Facewear)..]),
+            Title = BinaryPrimitives.ReadUInt16LittleEndian(span[(p + lay.Title)..]),
+            CurrentWorld = BinaryPrimitives.ReadUInt16LittleEndian(span[(p + lay.CurrentWorld)..]),
+            HomeWorld = BinaryPrimitives.ReadUInt16LittleEndian(span[(p + lay.HomeWorld)..]),
             HideHeadgear = (flags & CharacterLayout.DisplayHideHeadgear) != 0,
             HideWeapon = (flags & CharacterLayout.DisplayHideWeapon) != 0,
         };
@@ -267,7 +291,7 @@ public static class CharacterEditor
 
         var span = bytes.AsSpan();
         var replayLen = BinaryPrimitives.ReadInt32LittleEndian(span[ReplayFormat.OffReplayLen..]);
-        int spawnsWritten = 0, portraitsWritten = 0;
+        int spawnsWritten = 0, portraitsWritten = 0, rostersWritten = 0;
         var touched = new HashSet<ulong>();
 
         var off = 0;
@@ -278,12 +302,13 @@ public static class CharacterEditor
             int len = BinaryPrimitives.ReadUInt16LittleEndian(span[(b + 2)..]);
             var p = b + ReplayFormat.SegHeader;
 
-            if (op == spawnOp && len == CharacterLayout.SpawnLength)
+            var lay = op == spawnOp ? CharacterLayout.SpawnLayoutFor(len) : null;
+            if (lay is not null)
             {
-                var cid = BinaryPrimitives.ReadUInt64LittleEndian(span[(p + CharacterLayout.SpawnCharacterKey)..]);
+                var cid = BinaryPrimitives.ReadUInt64LittleEndian(span[(p + lay.CharacterKey)..]);
                 if (plans.TryGetValue(cid, out var plan) && plan.TouchesSpawn)
                 {
-                    WriteSpawn(span, p, plan);
+                    WriteSpawn(span, p, plan, lay);
                     spawnsWritten++;
                     touched.Add(cid);
                 }
@@ -300,13 +325,26 @@ public static class CharacterEditor
                     touched.Add(cid);
                 }
             }
+            else if (len == CharacterLayout.PartyListLength)
+            {
+                for (var i = 0; i < CharacterLayout.PartyListMembers; i++)
+                {
+                    var e = p + i * CharacterLayout.PartyListStride;
+                    var cid = BinaryPrimitives.ReadUInt64LittleEndian(span[(e + CharacterLayout.PartyListCharacterKey)..]);
+                    if (!plans.TryGetValue(cid, out var plan) || !plan.TouchesPartyList) continue;
+                    BinaryPrimitives.WriteUInt16LittleEndian(
+                        span[(e + CharacterLayout.PartyListHomeWorld)..], plan.Want.HomeWorld);
+                    rostersWritten++;
+                    touched.Add(cid);
+                }
+            }
             off += ReplayFormat.SegHeader + len;
         }
 
-        if (spawnsWritten == 0 && portraitsWritten == 0)
+        if (spawnsWritten == 0 && portraitsWritten == 0 && rostersWritten == 0)
             return $" · character edits ({plans.Count}) matched nothing in this export";
         return $" · edited {touched.Count} character{(touched.Count == 1 ? "" : "s")} " +
-               $"({spawnsWritten} spawns, {portraitsWritten} portraits)";
+               $"({spawnsWritten} spawns, {portraitsWritten} portraits, {rostersWritten} roster entries)";
     }
 
     /// <summary>Which fields differ between the original and the desired look.</summary>
@@ -320,6 +358,9 @@ public static class CharacterEditor
         public readonly bool[] CustomizeByte = new bool[Core.Customize.Length];
         public readonly bool Weapons;
         public readonly bool Facewear;
+        public readonly bool Title;
+        public readonly bool CurrentWorld;
+        public readonly bool HomeWorld;
         public readonly bool DisplayFlags;
         public readonly bool[] GearModel = new bool[CharacterLayout.GearSlots];
         public readonly bool[] GearDye = new bool[CharacterLayout.GearSlots];
@@ -332,6 +373,9 @@ public static class CharacterEditor
                 CustomizeByte[i] = was.Customize[i] != want.Customize[i];
             Weapons = !was.MainHand.SameAs(want.MainHand) || !was.OffHand.SameAs(want.OffHand);
             Facewear = was.Facewear != want.Facewear;
+            Title = was.Title != want.Title;
+            CurrentWorld = was.CurrentWorld != want.CurrentWorld;
+            HomeWorld = was.HomeWorld != want.HomeWorld;
             DisplayFlags = was.HideHeadgear != want.HideHeadgear || was.HideWeapon != want.HideWeapon;
             for (var s = 0; s < CharacterLayout.GearSlots && s < want.Gear.Length && s < was.Gear.Length; s++)
             {
@@ -344,23 +388,28 @@ public static class CharacterEditor
         public bool AnyCustomize => CustomizeByte.Any(x => x);
 
         public bool TouchesSpawn =>
-            AnyCustomize || Weapons || Facewear || DisplayFlags || GearModel.Any(x => x) || GearDye.Any(x => x);
+            AnyCustomize || Weapons || Facewear || Title || CurrentWorld || HomeWorld ||
+            DisplayFlags || GearModel.Any(x => x) || GearDye.Any(x => x);
 
         public bool TouchesPortrait =>
             AnyCustomize || Facewear || GearDye.Any(x => x) || PortraitItem.Any(x => x);
 
-        public bool Any => TouchesSpawn || TouchesPortrait;
+        /// <summary>The roster carries the home world and nothing else this editor
+        /// touches, so it is only rewritten when that actually moved.</summary>
+        public bool TouchesPartyList => HomeWorld;
+
+        public bool Any => TouchesSpawn || TouchesPortrait || TouchesPartyList;
     }
 
-    private static void WriteSpawn(Span<byte> span, int p, WritePlan plan)
+    private static void WriteSpawn(Span<byte> span, int p, WritePlan plan, SpawnLayout lay)
     {
         var a = plan.Want;
         for (var i = 0; i < Customize.Length; i++)
-            if (plan.CustomizeByte[i]) span[p + CharacterLayout.SpawnCustomize + i] = a.Customize[i];
+            if (plan.CustomizeByte[i]) span[p + lay.Customize + i] = a.Customize[i];
 
         for (var s = 0; s < CharacterLayout.GearSlots && s < a.Gear.Length; s++)
         {
-            var at = p + CharacterLayout.SpawnGear + s * 4;
+            var at = p + lay.Gear + s * 4;
             if (plan.GearModel[s])
             {
                 BinaryPrimitives.WriteUInt16LittleEndian(span[at..], a.Gear[s].Model);
@@ -368,23 +417,29 @@ public static class CharacterEditor
             }
             if (!plan.GearDye[s]) continue;
             span[at + 3] = a.Gear[s].Dye1;
-            span[p + CharacterLayout.SpawnDye2 + s] = a.Gear[s].Dye2;
+            span[p + lay.Dye2 + s] = a.Gear[s].Dye2;
         }
 
         if (plan.Weapons)
         {
-            WriteWeapon(span, p + CharacterLayout.SpawnWeapon, a.MainHand);
-            WriteWeapon(span, p + CharacterLayout.SpawnWeaponSub, a.OffHand);
+            WriteWeapon(span, p + lay.Weapon, a.MainHand);
+            WriteWeapon(span, p + lay.WeaponSub, a.OffHand);
         }
         if (plan.Facewear)
-            BinaryPrimitives.WriteUInt16LittleEndian(span[(p + CharacterLayout.SpawnFacewear)..], a.Facewear);
+            BinaryPrimitives.WriteUInt16LittleEndian(span[(p + lay.Facewear)..], a.Facewear);
+        if (plan.Title)
+            BinaryPrimitives.WriteUInt16LittleEndian(span[(p + lay.Title)..], a.Title);
+        if (plan.CurrentWorld)
+            BinaryPrimitives.WriteUInt16LittleEndian(span[(p + lay.CurrentWorld)..], a.CurrentWorld);
+        if (plan.HomeWorld)
+            BinaryPrimitives.WriteUInt16LittleEndian(span[(p + lay.HomeWorld)..], a.HomeWorld);
         if (!plan.DisplayFlags) return;
 
-        var flags = BinaryPrimitives.ReadUInt16LittleEndian(span[(p + CharacterLayout.SpawnDisplay)..]);
+        var flags = BinaryPrimitives.ReadUInt16LittleEndian(span[(p + lay.Display)..]);
         flags = (ushort)(flags & ~CharacterLayout.DisplayHideGear);
         if (a.HideHeadgear) flags |= CharacterLayout.DisplayHideHeadgear;
         if (a.HideWeapon) flags |= CharacterLayout.DisplayHideWeapon;
-        BinaryPrimitives.WriteUInt16LittleEndian(span[(p + CharacterLayout.SpawnDisplay)..], flags);
+        BinaryPrimitives.WriteUInt16LittleEndian(span[(p + lay.Display)..], flags);
     }
 
     private static void WritePortrait(Span<byte> span, int e, WritePlan plan)

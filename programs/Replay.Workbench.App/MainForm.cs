@@ -34,6 +34,11 @@ internal sealed class MainForm : Form
 
     private readonly ComboBox _patchPick = new() { DropDownStyle = ComboBoxStyle.DropDownList };
     private readonly ComboBox _racePick = new() { DropDownStyle = ComboBoxStyle.DropDownList };
+
+    /// <summary>An InitZone payload lifted from a current-layout recording, for
+    /// rebuilding an old one. Set from Tools; kept for the life of the process.</summary>
+    private byte[]? _initZoneTemplate;
+    private string? _initZoneTemplateFrom;
     private readonly FlatButton _btnExportPull = new("Export selected pull") { Accent = true, Width = 190 };
     private readonly FlatButton _btnExportFull = new("Export renamed full file") { Width = 190 };
     private readonly FlatButton _btnAnonNames = new("Anonymize all names") { Width = 160 };
@@ -169,6 +174,7 @@ internal sealed class MainForm : Form
 
         var tools = new ToolStripMenuItem("&Tools");
         tools.DropDownItems.Add(Item("&Register opcode table…", Keys.None, (_, _) => OpenDevMenu()));
+        tools.DropDownItems.Add(Item("Set &InitZone template…", Keys.None, (_, _) => PickInitZoneTemplate()));
 
         var help = new ToolStripMenuItem("&Help");
         help.DropDownItems.Add(Item("&About", Keys.None, (_, _) => MessageBox.Show(this,
@@ -480,6 +486,12 @@ internal sealed class MainForm : Form
         _exportHint.Text = "Select a pull from the timeline or table to enable export.";
         Relayout();
         Say($"Loaded {_file.Pulls.Count} pulls, {_file.Players.Count} players from {Path.GetFileName(_path)}.");
+        // Without this the same file just looks like it has nobody in it.
+        if (_file.UnknownSpawnLength is { } len)
+            Say($"This recording's PlayerSpawn packets are {len} bytes, a layout this build " +
+                $"doesn't know (it reads {string.Join(" and ", CharacterLayout.KnownSpawnLengths)}). " +
+                "Appearance editing and anonymize can't find anyone in it - names in the player " +
+                "list came from a byte scan and renaming them still works.", error: true);
     }
 
     // ---- rendering --------------------------------------------------------
@@ -571,10 +583,13 @@ internal sealed class MainForm : Form
             row.Controls.Add(idx);
             row.Controls.Add(box);
 
-            // The name list comes from scanning name fields, which finds people the
-            // spawn packets don't describe; only offer the editor where there is a
-            // character to edit.
-            var record = _characters.FirstOrDefault(c => c.Name == p.Name);
+            // Matched on the character key, never the name: two people can carry the
+            // same one, and matching on text would point both rows at one of them.
+            // A row with no key came from the name scan alone - someone the spawn
+            // packets don't describe - so there is nothing to edit.
+            var record = p.CharacterKey == 0
+                ? null
+                : _characters.FirstOrDefault(c => c.CharacterKey == p.CharacterKey);
             var cog = new CogButton
             {
                 Location = new Point(gutter + nameW + 14, 0),
@@ -584,7 +599,7 @@ internal sealed class MainForm : Form
             cog.Width = cog.Height;
             _rowTips.SetToolTip(cog, record is null
                 ? "No PlayerSpawn packet for this name - nothing to edit."
-                : $"Edit {record.Name}: race, gender, hair, colours, gear and dyes");
+                : $"Edit {record.Name}: race, gender, hair, colors, gear and dyes");
             if (record is not null)
             {
                 cog.Edited = _charEdits.ContainsKey(record.CharacterKey);
@@ -717,6 +732,19 @@ internal sealed class MainForm : Form
                 // wrong packet type.
                 if (_patchOverride is null && det is { Confident: true } && fromBuild is not null && fromBuild != det.Patch)
                     msg += $" - build {_file.FileBuild} is listed as {fromBuild}, but the packets say {det.Patch}";
+                // Renumbering alone isn't enough on a recording old enough that the
+                // structs have since grown, and the gap is silent: the export looks
+                // fine and the client refuses it. Say so on the option itself.
+                var old = PayloadMigrator.OldSized(_file);
+                if (old.Count > 0)
+                {
+                    msg += $" · also resizing {old.Count} packet type{(old.Count == 1 ? "" : "s")} " +
+                           $"({string.Join(", ", old.OrderBy(kv => kv.Key).Select(kv => $"{kv.Key} {kv.Value}→{PayloadMigrator.TargetSize[kv.Key]}"))})";
+                    if (old.ContainsKey("InitZone"))
+                        msg += _initZoneTemplate is null
+                            ? " · InitZone needs a template: Tools ▸ Set InitZone template… (a recent recording, same duty is best) or it will not load"
+                            : $" · InitZone rebuilt from {_initZoneTemplateFrom}";
+                }
                 _optTranspose.SubText = msg;
             }
         }
@@ -788,7 +816,15 @@ internal sealed class MainForm : Form
             note += s.Note;
         }
         if (_optTranspose.Box.Enabled && _optTranspose.Checked)
+        {
+            // Resize before renumbering: packets are picked by name in the file's
+            // own patch, and the two are useless apart - a file with new opcodes
+            // and old payload sizes is exactly what the client refuses to read.
+            var m = PayloadMigrator.Apply(bytes, _file!.FilePatch, _initZoneTemplate);
+            bytes = m.Bytes;
+            note += m.Note;
             note += Transpose.ApplyAndStamp(bytes, _file!.FilePatch, _file.FileBuild);
+        }
         return (bytes, note);
     }
 
@@ -842,6 +878,38 @@ internal sealed class MainForm : Form
         if (dlg.ShowDialog(this) != DialogResult.OK) return false;
         File.WriteAllBytes(dlg.FileName, bytes);
         return true;
+    }
+
+    /// <summary>
+    /// Pick a recording to lift a working InitZone out of.  Old recordings need
+    /// one because InitZone is the single packet whose change can't be expressed
+    /// as a resize - it drops bytes as well as adding them, so it is rebuilt from
+    /// a payload the live client already accepted.
+    /// </summary>
+    private void PickInitZoneTemplate()
+    {
+        using var dlg = new OpenFileDialog
+        {
+            Title = "Recording to take a current InitZone from (same duty is best)",
+            Filter = "FFXIV duty recording (*.dat)|*.dat|All files (*.*)|*.*",
+            InitialDirectory = Path.GetDirectoryName(_path) ?? "",
+        };
+        if (dlg.ShowDialog(this) != DialogResult.OK) return;
+        try
+        {
+            var name = Path.GetFileName(dlg.FileName);
+            var payload = PayloadMigrator.ReadInitZoneTemplate(
+                File.ReadAllBytes(dlg.FileName), name, out var error);
+            if (payload is null) { Say(error ?? "couldn't read an InitZone from that file", error: true); return; }
+            _initZoneTemplate = payload;
+            _initZoneTemplateFrom = name;
+            Say($"InitZone template set from {name} ({payload.Length} bytes).");
+            if (_file is not null) RenderOptionAvailability();
+        }
+        catch (Exception e)
+        {
+            Say(e.Message, error: true);
+        }
     }
 
     // ---- dev menu ---------------------------------------------------------

@@ -362,11 +362,18 @@
             <label class="anon-race disabled" id="src-patch-wrap">Recorded on
               <select id="src-patch" disabled></select>
             </label>
+            <!-- Only shown for recordings old enough that InitZone changed shape.
+                 It drops bytes as well as adding them, so unlike the other packets
+                 it can't be resized - it is rebuilt from one the client accepted. -->
+            <label class="anon-race hidden" id="initzone-wrap">InitZone template
+              <input type="file" id="initzone-template" accept=".dat">
+              <small id="initzone-sub">A recent recording to copy a working InitZone from — same duty is best</small>
+            </label>
             <label class="check disabled" id="anon-check">
               <input type="checkbox" id="anon-appear" disabled>
               <span class="box"></span>
               <span class="lbl">Anonymize players
-                <small id="anon-sub">Replace names, object IDs, race, gear &amp; weapons so no one is identifiable</small></span>
+                <small id="anon-sub">Replace names, object IDs, race, gear, weapons, titles &amp; worlds so no one is identifiable</small></span>
             </label>
             <label class="anon-race disabled" id="anon-race-wrap">Race
               <select id="anon-race" disabled>

@@ -43,11 +43,18 @@ public sealed class Pull
     public required int CountdownIndex { get; init; }
 }
 
-/// <summary>A 32-byte character-name field found in the file, and every place it occurs.</summary>
+/// <summary>One person in the recording: the name they carry and every place it occurs.</summary>
 public sealed class PlayerName
 {
     public required string Name { get; init; }
     public required IReadOnlyList<int> Offsets { get; init; }
+
+    /// <summary>
+    /// The PlayerSpawn character key this person was read from, or 0 when the name
+    /// was only found by scanning and no spawn packet describes them.  Two people
+    /// can carry the same name, so this - not the name - is what identifies them.
+    /// </summary>
+    public ulong CharacterKey { get; init; }
 
     /// <summary>What the user typed, or null when untouched.</summary>
     public string? NewName { get; set; }

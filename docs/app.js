@@ -742,6 +742,12 @@ function renderPatchControls(){
   const tCheck=document.getElementById("transpose-check"), tBox=document.getElementById("transpose"),
         tSub=document.getElementById("transpose-sub");
   const enable=(on)=>{ tCheck.classList.toggle("disabled",!on); tBox.disabled=!on; if(!on) tBox.checked=false; };
+  // Work out the resizing up front: every path below returns, and the InitZone
+  // control has to be hidden again on a file that doesn't need it, not just shown
+  // on one that does.
+  const old=oldSizedPackets();
+  const izWrap=document.getElementById("initzone-wrap");
+  if(izWrap) izWrap.classList.toggle("hidden", !old.has("InitZone"));
   if(!filePatch){
     enable(false);
     tSub.textContent = det
@@ -765,6 +771,17 @@ function renderPatchControls(){
   // chain: a one-hotfix-off guess remaps every packet onto the wrong packet type.
   if(!patchOverride && det && det.confident && fromBuild && fromBuild!==det.patch)
     msg += ` - build ${fileBuild} is listed as ${fromBuild}, but the packets say ${det.patch}`;
+  // Renumbering alone isn't enough on a recording old enough that the structs have
+  // since grown, and the gap is silent: the export looks fine and the client
+  // refuses it. Say so on the option itself.
+  if(old.size){
+    msg += ` · also resizing ${old.size} packet type${old.size===1?"":"s"} (` +
+           [...old.entries()].sort().map(([n,sz])=>`${n} ${sz}→${MIGRATE_TARGET[n]}`).join(", ") + ")";
+    if(old.has("InitZone"))
+      msg += initZoneTemplate
+        ? ` · InitZone rebuilt from ${initZoneTemplateFrom}`
+        : " · InitZone needs a template recording below, or this will not load";
+  }
   tSub.textContent=msg;
 }
 
@@ -806,6 +823,254 @@ function loadBytes(name, buffer){
       emitNames(); // sync playback to the freshly loaded (unedited) names
     }catch(err){ toast(err.message,true); }
   }
+}
+
+/* =====================================================================
+   Payload migration — resize the packets whose struct grew.
+
+   Transpose renumbers opcodes, which is the whole job only while a packet's
+   layout holds still. It doesn't for everything: between 7.16h and 7.55h2 five
+   packet types changed size, and a client handed a 112-byte InitZone where it
+   expects 136 stops reading at packet zero. So this runs alongside transpose —
+   neither is any use without the other, and a file with one applied and not the
+   other is worse than the original.
+
+   Where the layouts come from: a 7.16h and a 7.55h recording of the same duty,
+   which makes the comparison controlled — same cast, same arena, and a field
+   that is constant in one is constant in the other. Confirmed the only way that
+   finally counts, by loading the converted recording in the live client.
+
+   Runs before transpose, so packets are still on the file's own opcodes and are
+   found by name in the file's own patch. The other way round means picking
+   packets by numbers that meant something else in the older patch.
+   ===================================================================== */
+// What each payload must measure on the current patch (7.51–7.55h2 recordings).
+const MIGRATE_TARGET={PlayerSpawn:664, NpcSpawn:656, ActorControlSelf:40, Countdown:64, InitZone:136};
+
+/* The measured moves. `inserts` are runs of zero bytes to splice in, in OLD
+   payload coordinates — each offset is the byte its run goes in front of, so the
+   entries never shift one another. Whatever they leave short of the target is
+   zero padding at the tail.
+
+   PlayerSpawn      proven rather than inferred: every field was located against
+                    the party-portrait packet (customize block, job byte and both
+                    dye channels are byte-identical to the spawn's, and it did not
+                    change size). Job lands at +2, everything from the gear array
+                    onward at +4, so the inserts fall in (126,140) and (157,164) —
+                    runs of zero padding in BOTH patches, which is why splicing
+                    zeros reproduces the real layout exactly. The last 4 are tail,
+                    zero in both.
+   NpcSpawn         same shape, established statistically. A per-byte value
+                    distribution steps cleanly 0 → +2 → +4, and each transition is
+                    confirmed by a distinctive field landing on its counterpart:
+                    the 0x00/0x10 byte at old 146 → new 148 and 0x00/0x01 at old
+                    147 → new 149 (+2), while 0x00/0x30 at old 148 → new 152 (+4).
+   ActorControlSelf plain tail growth — the 8 added bytes are zero in all 4488
+                    current samples, and matched packets are byte-identical
+                    across the first 32.
+   Countdown        a 16-byte head appeared: object id old +0 → new +16, second id
+                    +4 → +20, name +11 → +27. The first 8 bytes of that head are
+                    the initiating player's character key, filled in from the file
+                    rather than left zero.
+
+   InitZone is deliberately absent — it DELETES 8 bytes as well as adding 32, so
+   no splice can express it. It is rebuilt from a template instead. */
+const MIGRATIONS=[
+  {packet:"PlayerSpawn",      from:656, to:664, inserts:[[126,2],[157,2]]}, // remaining 4 pad the tail
+  {packet:"NpcSpawn",         from:648, to:656, inserts:[[124,2],[148,2]]}, // remaining 4 pad the tail
+  {packet:"ActorControlSelf", from:32,  to:40,  inserts:[]},
+  {packet:"Countdown",        from:48,  to:64,  inserts:[[0,16]]},
+];
+
+function migrateOnePayload(m, payload){
+  const out=new Uint8Array(m.to);
+  let read=0, write=0;
+  for(const [at,count] of [...m.inserts].sort((a,b)=>a[0]-b[0])){
+    if(at>payload.length || write+count>m.to) break;
+    const run=Math.min(at-read, m.to-write);
+    if(run>0) out.set(payload.subarray(read,read+run), write);
+    write+=run+count; // the spliced bytes are already zero
+    read=at;
+  }
+  const rest=Math.min(payload.length-read, m.to-write);
+  if(rest>0) out.set(payload.subarray(read,read+rest), write);
+  return out;
+}
+
+// InitZone's recording-specific fields; everything else is constant across
+// current samples or always zero, so it can come from a template. +0x06 is
+// confirmed — it equals the header's content id in every recording checked.
+const IZ_IDENT=[[0x00,2],[0x02,2],[0x04,2],[0x06,2],[0x10,1],[0x13,1]];
+const IZ_OLD_POS=0x50, IZ_NEW_POS=0x68, IZ_POS_N=12;
+
+/* Rebuild an InitZone against a working one: start from a payload the live client
+   already accepted and overwrite only the fields that identify this recording.
+   Going this direction removes the guess — anything unidentified keeps a value
+   known to work rather than one we invented. */
+function rebuildInitZone(old, template){
+  const out=template.slice();
+  for(const [at,len] of IZ_IDENT) if(at+len<=old.length) out.set(old.subarray(at,at+len), at);
+  const from = old.length===MIGRATE_TARGET.InitZone ? IZ_NEW_POS : IZ_OLD_POS;
+  if(from+IZ_POS_N<=old.length) out.set(old.subarray(from,from+IZ_POS_N), IZ_NEW_POS);
+  return out;
+}
+
+/* Object id -> character key, off this file's PlayerSpawn packets. Both spawn
+   layouts keep the key at payload +0 and the spawning player's object id in the
+   segment header, so this doesn't care which one it's reading. */
+function spawnKeyMap(bytes, dv, replayLen, spawnOp){
+  const map=new Map();
+  if(spawnOp==null) return map;
+  let off=0;
+  while(off<replayLen){
+    const b=DATA_START+off, op=dv.getUint16(b,true), len=dv.getUint16(b+2,true);
+    if(op===spawnOp && len>=8){
+      const oid=dv.getUint32(b+8,true);
+      const key=dv.getBigUint64(b+SEG_HEADER,true);
+      if(oid && key) map.set(oid,key);
+    }
+    off+=SEG_HEADER+len;
+  }
+  return map;
+}
+
+// Packet name -> the old size it was found at, for anything the client would
+// reject. Empty means the file needs no resizing.
+function oldSizedPackets(){
+  const t=patchTable(filePatch); const found=new Map();
+  if(!t) return found;
+  for(const [name,target] of Object.entries(MIGRATE_TARGET)){
+    const op=t[name]; if(op==null) continue;
+    const hit=segs.find(s=>s.opcode===op && s.dataLength!==target);
+    if(hit) found.set(name,hit.dataLength);
+  }
+  return found;
+}
+
+/* Resize every packet that needs it, and fix up what the sizes invalidate: the
+   replay length, and every chapter offset, which points into the data stream and
+   so moves by however many bytes grew before it.
+
+   Without a template the InitZone is left alone and reported, because a rebuilt
+   guess is worse than a clearly-stated gap. Returns {bytes, note}: a NEW array
+   when anything was resized, else the original. */
+function migratePayloads(bytes, template){
+  const t=patchTable(filePatch);
+  if(!t) return {bytes, note:""};
+  const opToName=new Map();
+  for(const name of Object.keys(MIGRATE_TARGET)) if(t[name]!=null) opToName.set(t[name],name);
+  if(!opToName.size) return {bytes, note:""};
+
+  const dv=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);
+  const replayLen=dv.getInt32(OFF_REPLAY_LEN,true);
+  const keys=spawnKeyMap(bytes,dv,replayLen,t.PlayerSpawn);
+
+  const chunks=[]; const shifts=[]; const counts=new Map(); const blocked=new Set();
+  let off=0, grown=0, bodyLen=0;
+  while(off<replayLen){
+    const b=DATA_START+off, op=dv.getUint16(b,true), len=dv.getUint16(b+2,true), p=b+SEG_HEADER;
+    const header=bytes.slice(b,b+SEG_HEADER);
+    const payload=bytes.subarray(p,p+len);
+    const name=opToName.get(op);
+    let resized=null;
+    if(name!=null && len!==MIGRATE_TARGET[name]){
+      if(name==="InitZone"){
+        if(template) resized=rebuildInitZone(payload,template);
+        else blocked.add(`InitZone is ${len} bytes and needs a template recording to rebuild from`);
+      } else {
+        const m=MIGRATIONS.find(x=>x.packet===name && x.from===len);
+        if(m){
+          resized=migrateOnePayload(m,payload);
+          // Countdown's new head opens with the character key; the packet still
+          // carries the player's object id, so it can be looked up.
+          if(name==="Countdown" && len>=4){
+            const key=keys.get(dv.getUint32(p,true));
+            if(key!=null) new DataView(resized.buffer).setBigUint64(0,key,true);
+          }
+        } else blocked.add(`${name} is ${len} bytes, a size no measured layout covers`);
+      }
+    }
+    if(resized){
+      new DataView(header.buffer).setUint16(2,resized.length,true);
+      counts.set(name,(counts.get(name)||0)+1);
+      grown+=resized.length-len;
+      chunks.push(header,resized); bodyLen+=SEG_HEADER+resized.length;
+    } else {
+      chunks.push(header,payload); bodyLen+=SEG_HEADER+len;
+    }
+    off+=SEG_HEADER+len;
+    shifts.push([off,grown]);
+  }
+  if(!counts.size && !blocked.size) return {bytes, note:""};
+
+  const trailing=bytes.subarray(DATA_START+replayLen);
+  const out=new Uint8Array(DATA_START+bodyLen+trailing.length);
+  out.set(bytes.subarray(0,DATA_START));
+  let w=DATA_START;
+  for(const c of chunks){ out.set(c,w); w+=c.length; }
+  out.set(trailing,w);
+
+  const ov=new DataView(out.buffer);
+  ov.setInt32(OFF_REPLAY_LEN,bodyLen,true);
+  const nch=Math.max(0,Math.min(ov.getInt32(HEADER_SIZE,true),MAX_CHAPTERS));
+  for(let i=0;i<nch;i++){
+    const e=HEADER_SIZE+4+i*CHAPTER_ENTRY, at=ov.getUint32(e+4,true);
+    let delta=0;
+    for(const [end,g] of shifts){ if(end>at) break; delta=g; }
+    ov.setUint32(e+4,at+delta,true);
+  }
+
+  const detail=[...counts.entries()].sort().map(([n,c])=>`${n} x${c}`).join(", ");
+  let note = counts.size ? ` · resized ${detail} (${grown>=0?"+":""}${grown.toLocaleString()} bytes)` : "";
+  for(const why of blocked) note+=` · NOT resized: ${why}`;
+  return {bytes:out, note};
+}
+
+/* Lift an InitZone payload out of a recording already on the current layout.
+   Prefer the SAME duty: InitZone carries the territory, the content id and the
+   arena spawn position, so a same-duty template needs almost nothing
+   transplanted into it. The template need not be on the latest patch, only new
+   enough to already be the target size — its opcode is resolved in whatever
+   patch it actually is. Returns {payload} or {error}. */
+function readInitZoneTemplate(buffer){
+  const b=new Uint8Array(buffer), dv=new DataView(buffer);
+  for(let i=0;i<MAGIC.length;i++) if(b[i]!==MAGIC[i]) return {error:"not an FFXIVREPLAY .dat"};
+  const replayLen=dv.getInt32(OFF_REPLAY_LEN,true);
+  const hist=new Map();
+  let off=0;
+  while(off<replayLen && DATA_START+off+SEG_HEADER<=b.length){
+    const at=DATA_START+off, op=dv.getUint16(at,true);
+    hist.set(op,(hist.get(op)||0)+1);
+    off+=SEG_HEADER+dv.getUint16(at+2,true);
+  }
+  const det=detectPatch(hist,LATEST_PATCH);
+  const patch=(det&&det.confident) ? det.patch : BUILD_TO_PATCH[dv.getInt32(OFF_BUILD,true)];
+  const t=patch ? patchTable(patch) : null;
+  if(!t||t.InitZone==null) return {error:`can't tell what patch that recording is on (closest ${det?det.patch:"none"})`};
+  const want=MIGRATE_TARGET.InitZone;
+  off=0;
+  while(off<replayLen && DATA_START+off+SEG_HEADER<=b.length){
+    const at=DATA_START+off, op=dv.getUint16(at,true), len=dv.getUint16(at+2,true);
+    if(op===t.InitZone){
+      if(len!==want) return {error:`that recording reads as ${patch} and its InitZone is ${len} bytes, not ${want} — the template has to be recent enough to already be on the current layout`};
+      return {payload:b.slice(at+SEG_HEADER,at+SEG_HEADER+want), patch};
+    }
+    off+=SEG_HEADER+len;
+  }
+  return {error:"no InitZone packet in that recording"};
+}
+
+// An InitZone payload from a current-layout recording, for rebuilding an old one.
+// Set from the export panel; kept for the life of the page.
+let initZoneTemplate=null, initZoneTemplateFrom=null;
+
+/* Resize old packets, then remap opcodes — the two halves of "make this load on
+   the current patch". Returns {bytes, note}: a NEW array when anything grew. */
+function applyPatchUpgradeIfChecked(bytes){
+  const box=document.getElementById("transpose");
+  if(box.disabled || !box.checked) return {bytes, note:""};
+  const m=migratePayloads(bytes, initZoneTemplate);
+  return {bytes:m.bytes, note:m.note+applyTransposeIfChecked(m.bytes)};
 }
 
 // If "Transpose opcodes" is on, remap every packet to the latest patch and stamp the
@@ -876,34 +1141,90 @@ function stripPartyPortraitsIfChecked(bytes){
    Player anonymization — swap every party member to a chosen race (keeping
    their gender), redress them in their job's artifact gear, and blank names.
    Identity leaks from three packets, so all are rewritten:
-     PlayerSpawn  (664B)         — the in-arena model: race + AF gear (model IDs)
+     PlayerSpawn  (664B now, 656B on early Dawntrail recordings — the layout is
+       picked from the packet's own length) — the in-arena model: race + AF gear (model IDs)
                                    + facewear/glasses id (stripped to 0)
+                                   + title id (stripped to 0)
+                                   + current/home world (both set to ANON_WORLD)
      party-member appearance     — the "Party Members" portraits: race + AF gear
        (1408B = 8x176, gear stored as item IDs; matched by length) +
        facewear/glasses id (stripped to 0)
                                    + mainhand/offhand weapon model (swapped to AF)
+     PartyList    (3672B = 8x456 + a 24-byte trailer; matched by length) — the
+       party panel's roster, which keeps its own copy of each member's home world
+       and would otherwise go on naming worlds the spawn packets no longer admit to
      plus every name string, replaced length-preserving across the file.
    AF gear comes from JOB_AF_GEAR (afgear.js): item IDs for the appearance packet,
    [model,variant] armor + [model,base,variant] weapon for the spawn packet.
    ===================================================================== */
-// PlayerSpawn payload offsets
-// PS_FACE: facewear/glasses model id (u16) in the 14-byte block between the gear
-// array and the name. 0 = none; confirmed against a known replay (Vivi=457).
-// PS_WEAPON/PS_WEAPON_SUB: mainhand + offhand weapon, each a u64 packed as
-// [model u16][base u16][variant u16][dye u16]. Confirmed by diffing two captures
-// that changed only the weapon glamour (item 44732 -> 2001/76/2, 22875 -> 2007/1/3).
-const PS_LEN=664, PS_WEAPON=0x30, PS_WEAPON_SUB=0x38, PS_GEAR=540, PS_GEAR_N=40, PS_FACE=590, PS_NAME=594, PS_NAME_N=32, PS_CUST=626, PS_JOB=151;
-// PS_DISPLAY: u16 display flags at +0x74. 0x40 = hide headgear, 0x80 = hide
-// weapon — set when a player toggles those off on the character screen. We must
-// clear them after re-dressing, or the AF helm/weapon we wrote stays invisible.
-const PS_DISPLAY=0x74, DISPLAY_HIDE_GEAR=0x40|0x80;
-// PS_DYE2: per-slot second dye channel (Dawntrail), one byte per gear slot,
-// packed right after the 40-byte gear array and before PS_FACE. Left intact it
-// leaks the player's real dyes; on at least one capture the head slot's byte was
-// non-zero only on the actor whose helm refused to render after re-dressing.
-const PS_DYE2=PS_GEAR+PS_GEAR_N, PS_DYE2_N=PS_GEAR_N/4; // 580, 10 slots
-// party-member appearance payload: 8 members of this stride
+/* PlayerSpawn payload offsets — deliberately NOT constants.
+
+   The packet grew over Dawntrail, so a recording made before it grew keeps every
+   field somewhere else, and a tool that assumes one layout does not fail loudly
+   on the other: it matches no spawn packet at all, lists nobody, and reports a
+   successful anonymize while leaving every real name in the file.
+
+   Which layout a packet uses is answered by the packet — the segment header
+   carries its payload length and each layout has its own — so nothing here has to
+   know which patch first moved a field. Always match the PlayerSpawn opcode
+   first: the sizes are only unique among PlayerSpawns (7.55h's NpcSpawn is 656
+   bytes, the same as 7.16h's PlayerSpawn).
+
+   664 is current. 656 was measured on a 7.16h recording by cross-referencing the
+   party-portrait packet, whose customize block, job byte and both dye channels
+   are byte-identical to the spawn's and which did not change size. The head —
+   key, both weapons, the display flags — did not move at all; job moved +2 and
+   everything from the gear array onward +4.
+
+   title: the worn title (u16), a row in the game's Title sheet; 0 = none. Derived
+     from three recordings of one character differing only in the title worn — 8,
+     9 and 865. The 8 -> 865 pair moves both bytes, which is what makes it a u16
+     rather than a byte plus padding, and 865 is far too large to be an index into
+     one character's unlocked list, so it is the sheet row itself. Every NpcSpawn
+     reads 0 here, as an NPC should.
+   curWorld/homeWorld: the world the character is logged in on, and the one they
+     belong to (u16 each). Measured on an eight-player recording: six distinct
+     values across the party, and two members reading 65/81 and 65/408 — visitors
+     on the recorder's own world 65. Those two are what tell the fields apart; a
+     party sitting at home would have shown one repeated number and proved nothing.
+   face: facewear/glasses model id (u16) between the dye array and the name.
+     0 = none; confirmed against a known replay (Vivi=457).
+   weapon/weaponSub: mainhand + offhand, each a u64 packed as
+     [model u16][base u16][variant u16][dye u16]. Confirmed by diffing two
+     captures that changed only the weapon glamour (44732 -> 2001/76/2). */
+/* title/curWorld/homeWorld are inferred for 656, not measured: every sample
+   carrying a title or a cross-world player is 664-byte. All three sit in the head,
+   which the note above records as not having moved between the two layouts. */
+const SPAWN_LAYOUTS=[
+  {len:664, key:0, title:16, curWorld:20, homeWorld:22, weapon:0x30, weaponSub:0x38, display:0x74, job:151, gear:540, dye2:580, face:590, name:594, cust:626},
+  {len:656, key:0, title:16, curWorld:20, homeWorld:22, weapon:0x30, weaponSub:0x38, display:0x74, job:149, gear:536, dye2:576, face:586, name:590, cust:622},
+];
+const spawnLayoutFor=(len)=>SPAWN_LAYOUTS.find(l=>l.len===len)||null;
+// Sizes and flags that hold in every known layout.
+// display flags: 0x40 = hide headgear, 0x80 = hide weapon — set when a player
+// toggles those off on the character screen. We must clear them after
+// re-dressing, or the AF helm/weapon we wrote stays invisible.
+// dye2: per-slot second dye channel (Dawntrail), one byte per gear slot, packed
+// right after the 40-byte gear array. Left intact it leaks the player's real
+// dyes; on at least one capture the head slot's byte was non-zero only on the
+// actor whose helm refused to render after re-dressing.
+const PS_GEAR_N=40, PS_DYE2_N=10, PS_NAME_N=32, DISPLAY_HIDE_GEAR=0x40|0x80;
+// party-member appearance payload: 8 members of this stride. Unlike the spawn
+// packet this one has not moved — a 7.16h recording's portrait blocks match the
+// current offsets field for field.
 const AP_LEN=1408, AP_STRIDE=176, AP_JOB=17, AP_GEAR=80, AP_FACE=120, AP_CUST=124;
+// PartyList: 8 roster slots of this stride, then a 24-byte trailer (3672 = 8*456+24).
+// Every offset is pinned by something that identifies itself — the member names sit
+// exactly 456 bytes apart, the key at +40 matches that player's PlayerSpawn key, and
+// the world at +80 is the *home* world (the member who is 65/81 in her spawn reads 81
+// here). There is no current-world field: hers is the only world-valued u16 in her
+// whole block. Unfilled slots have a zero key.
+const PL_LEN=3672, PL_STRIDE=456, PL_MEMBERS=8, PL_KEY=40, PL_HOME=80;
+// The world every anonymized character is moved to. One shared value rather than a
+// random one per player: a world id is not a name, so the point is to stop the roster
+// narrowing who the party was, and eight players scattered across eight invented
+// worlds would say more about them than eight on one.
+const ANON_WORLD=91;
 
 // A valid generic customize for (race, gender): default features, mid tones.
 function customizeFor(race,gender){
@@ -951,9 +1272,10 @@ function applyAnonymizeIfChecked(bytes){
   let off=0;
   while(off<replayLen){
     const b=DATA_START+off, op=dv.getUint16(b,true), len=dv.getUint16(b+2,true), p=b+SEG_HEADER;
-    if(spawnOp!=null && op===spawnOp && len===PS_LEN){
-      let end=p+PS_NAME; while(end<p+PS_NAME+PS_NAME_N && bytes[end]!==0) end++;
-      const nm=td.decode(bytes.subarray(p+PS_NAME,end));
+    const L=(spawnOp!=null && op===spawnOp) ? spawnLayoutFor(len) : null;
+    if(L){
+      let end=p+L.name; while(end<p+L.name+PS_NAME_N && bytes[end]!==0) end++;
+      const nm=td.decode(bytes.subarray(p+L.name,end));
       if(nm && !labels.has(nm)) labels.set(nm,`Player ${labels.size+1}`);
       const oid=dv.getUint32(b+8,true);
       if(oid) oids.add(oid);
@@ -973,21 +1295,28 @@ function applyAnonymizeIfChecked(bytes){
   }
 
   // Pass 2: race (+ gear) on spawn and appearance packets.
-  let spawns=0, appears=0, dressed=0;
+  let spawns=0, appears=0, dressed=0, rosters=0;
   off=0;
   while(off<replayLen){
     const b=DATA_START+off, op=dv.getUint16(b,true), len=dv.getUint16(b+2,true), p=b+SEG_HEADER;
-    if(spawnOp!=null && op===spawnOp && len===PS_LEN){
-      writeCustomize(bytes,p+PS_CUST,race);
-      const g=JOB_AF_GEAR[bytes[p+PS_JOB]];
+    const L=(spawnOp!=null && op===spawnOp) ? spawnLayoutFor(len) : null;
+    if(L){
+      writeCustomize(bytes,p+L.cust,race);
+      const g=JOB_AF_GEAR[bytes[p+L.job]];
       if(g){ // dress the in-arena model: [model:u16][variant:u8][stain:u8] per slot
-        g.gearModels.forEach(([m,v],s)=>{ dv.setUint16(p+PS_GEAR+s*4,m,true); bytes[p+PS_GEAR+s*4+2]=v; bytes[p+PS_GEAR+s*4+3]=0; });
-        writeWeapon(dv,p+PS_WEAPON,g.weaponModel);   // mainhand -> AF weapon
-        writeWeapon(dv,p+PS_WEAPON_SUB,g.weaponSub); // offhand  -> AF secondary (or cleared)
-      } else { bytes.fill(0,p+PS_GEAR,p+PS_GEAR+PS_GEAR_N); writeWeapon(dv,p+PS_WEAPON); writeWeapon(dv,p+PS_WEAPON_SUB); }
-      dv.setUint16(p+PS_FACE,0,true); // strip facewear/glasses — it leaks identity
-      dv.setUint16(p+PS_DISPLAY, dv.getUint16(p+PS_DISPLAY,true) & ~DISPLAY_HIDE_GEAR, true); // unhide helm/weapon so the AF gear renders
-      bytes.fill(0,p+PS_DYE2,p+PS_DYE2+PS_DYE2_N); // clear residual 2nd-dye bytes for the redressed slots
+        g.gearModels.forEach(([m,v],s)=>{ dv.setUint16(p+L.gear+s*4,m,true); bytes[p+L.gear+s*4+2]=v; bytes[p+L.gear+s*4+3]=0; });
+        writeWeapon(dv,p+L.weapon,g.weaponModel);   // mainhand -> AF weapon
+        writeWeapon(dv,p+L.weaponSub,g.weaponSub);  // offhand  -> AF secondary (or cleared)
+      } else { bytes.fill(0,p+L.gear,p+L.gear+PS_GEAR_N); writeWeapon(dv,p+L.weapon); writeWeapon(dv,p+L.weaponSub); }
+      dv.setUint16(p+L.face,0,true); // strip facewear/glasses — it leaks identity
+      dv.setUint16(p+L.title,0,true); // a rare title narrows the field hard
+      // Home world is a short list a real person is on, and a visitor's current
+      // world says which one they travelled to; both narrow the party, so everyone
+      // is moved to the same world instead.
+      dv.setUint16(p+L.curWorld,ANON_WORLD,true);
+      dv.setUint16(p+L.homeWorld,ANON_WORLD,true);
+      dv.setUint16(p+L.display, dv.getUint16(p+L.display,true) & ~DISPLAY_HIDE_GEAR, true); // unhide helm/weapon so the AF gear renders
+      bytes.fill(0,p+L.dye2,p+L.dye2+PS_DYE2_N); // clear residual 2nd-dye bytes for the redressed slots
       spawns++;
     } else if(len===AP_LEN){
       for(let i=0;i<AP_LEN/AP_STRIDE;i++){
@@ -1001,6 +1330,15 @@ function applyAnonymizeIfChecked(bytes){
         dv.setUint16(e+AP_FACE,0,true); // strip facewear/glasses here too
       }
       appears++;
+    } else if(len===PL_LEN){
+      // The roster's own copy of the home world. Left alone it survives every
+      // other pass here.
+      for(let i=0;i<PL_MEMBERS;i++){
+        const e=p+i*PL_STRIDE;
+        if(dv.getUint32(e+PL_KEY,true)===0 && dv.getUint32(e+PL_KEY+4,true)===0) continue; // empty slot
+        dv.setUint16(e+PL_HOME,ANON_WORLD,true);
+        rosters++;
+      }
     }
     off+=SEG_HEADER+len;
   }
@@ -1024,7 +1362,7 @@ function applyAnonymizeIfChecked(bytes){
     idHits+=replaceBytes(bytes,need,rep);
   }
 
-  return ` · anonymized ${labels.size} players (${spawns} spawns, ${dressed} dressed, ${idMap.size} ids→${idHits} refs)`;
+  return ` · anonymized ${labels.size} players (${spawns} spawns, ${dressed} dressed, ${rosters} roster entries, ${idMap.size} ids→${idHits} refs)`;
 }
 
 // Enable the race dropdown only while "Anonymize players" is checked.
@@ -1045,11 +1383,31 @@ document.getElementById("btn-split").addEventListener("click",async()=>{
     let bytes=buildPull(selectedPull,opts);
     const anon=applyAnonymizeIfChecked(bytes);
     const strip=stripPartyPortraitsIfChecked(bytes); bytes=strip.bytes;
-    const note=anon+strip.note+applyTransposeIfChecked(bytes);
+    const up=applyPatchUpgradeIfChecked(bytes); bytes=up.bytes;
+    const note=anon+strip.note+up.note;
     const ghosts=lastGhostsDropped ? ` · removed ${lastGhostsDropped} stale duplicate spawn${lastGhostsDropped>1?"s":""}` : "";
     const base=fileName.replace(/\.dat$/i,"");
     const saved=await download(bytes,`pull${pulls[selectedPull].n}_${base}.dat`);
     if(saved) toast(`Exported pull ${pulls[selectedPull].n} (${fmtBytes(bytes.length)})${note}${ghosts}.`);
+  }catch(err){ toast(err.message,true); }
+});
+
+const IZ_HINT="A recent recording to copy a working InitZone from — same duty is best";
+document.getElementById("initzone-template").addEventListener("change",async(e)=>{
+  const f=e.target.files && e.target.files[0];
+  if(!f) return;
+  try{
+    const r=readInitZoneTemplate(await f.arrayBuffer());
+    if(r.error){
+      initZoneTemplate=null; initZoneTemplateFrom=null;
+      toast(r.error,true);
+    }else{
+      initZoneTemplate=r.payload; initZoneTemplateFrom=f.name;
+      toast(`InitZone template set from ${f.name} (${r.patch}).`);
+    }
+    document.getElementById("initzone-sub").textContent =
+      initZoneTemplate ? `Using ${initZoneTemplateFrom}` : IZ_HINT;
+    if(segs.length) renderPatchControls();
   }catch(err){ toast(err.message,true); }
 });
 
@@ -1067,7 +1425,8 @@ document.getElementById("btn-names").addEventListener("click",async()=>{
     let bytes=buildRenamedFull();
     const anon=applyAnonymizeIfChecked(bytes);
     const strip=stripPartyPortraitsIfChecked(bytes); bytes=strip.bytes;
-    const note=anon+strip.note+applyTransposeIfChecked(bytes);
+    const up=applyPatchUpgradeIfChecked(bytes); bytes=up.bytes;
+    const note=anon+strip.note+up.note;
     const saved=await download(bytes,`RENAMED_${fileName}`);
     if(saved) toast(`Exported full recording with edited names (${fmtBytes(bytes.length)})${note}.`);
   }catch(err){ toast(err.message,true); }

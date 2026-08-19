@@ -538,7 +538,7 @@ internal sealed class CogButton : Control
         g.Clear(BackColor);
         g.SmoothingMode = SmoothingMode.AntiAlias;
 
-        var colour = !Enabled ? Theme.InkFaint
+        var color = !Enabled ? Theme.InkFaint
             : _edited ? Theme.Phosphor
             : _hover ? Theme.Ink
             : Theme.InkDim;
@@ -547,7 +547,7 @@ internal sealed class CogButton : Control
         var r = Math.Min(Width, Height) / 2f - 2f;
         if (r < 3) return;
 
-        using var pen = new Pen(colour, Math.Max(1.4f, r * 0.26f));
+        using var pen = new Pen(color, Math.Max(1.4f, r * 0.26f));
         // hub
         var hub = r * 0.42f;
         g.DrawEllipse(pen, cx - hub, cy - hub, hub * 2, hub * 2);

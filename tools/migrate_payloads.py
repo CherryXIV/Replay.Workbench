@@ -8,12 +8,17 @@ layout holds still. It doesn't for everything: between 7.16h and 7.55h five
 packet types changed size, and a client handed a 112-byte InitZone where it
 expects 136 stops reading the replay at packet zero.
 
-Fixing that properly needs the field layout of both versions. We have the new
-side pinned (hundreds of sample recordings) and only one old recording, which is
-enough to locate a few anchors and not enough to prove the rest -- so this ships
-several competing HYPOTHESES instead of one answer. Convert a file under each,
-see which one the game accepts, and the winner tells us what the layout actually
-did. Run --list to see them.
+Fixing that properly needs the field layout of both versions. The `measured`
+plan has them: a 7.16h and a 7.55h recording OF THE SAME DUTY make the
+comparison controlled, and four of the five packets are now pinned rather than
+guessed (PlayerSpawn outright proven against the party-portrait packet). See the
+comment above HYPOTHESES["measured"] for what backs each one. InitZone is the
+exception - it deletes bytes as well as adding them, so it needs
+--template-from.
+
+The older HYPOTHESES are kept because they are what was tried before, and
+because the game is still the only thing that can confirm any of this. Convert a
+file under each, see which the client accepts. Run --list to see them.
 
 Sizes are per (packet, old_size) and only apply when the payload really is the
 old size, so a file that's already correct passes through untouched.
@@ -127,6 +132,66 @@ def insert_at(offset: int, count: int):
     return fn
 
 
+def insert_many(*points):
+    """Splice zeros in at several offsets at once, then pad the remainder.
+
+    Offsets are in OLD coordinates -- each is the position in the original
+    payload that the new bytes go in front of, so they don't shift each other.
+    """
+    def fn(payload: bytes, target: int) -> bytes:
+        out, prev = bytearray(), 0
+        for off, count in sorted(points):
+            if off > len(payload):
+                break
+            out += payload[prev:off] + b"\0" * count
+            prev = off
+        out += payload[prev:]
+        return pad_tail(bytes(out), target) if len(out) < target else bytes(out[:target])
+    return fn
+
+
+def countdown_migrate(keymap: dict):
+    """Countdown gained a 16-byte head; the first 8 of it are the character key.
+
+    Measured: the initiating player's object id sits at old +0 and new +16, the
+    second id at old +4 / new +20, and the name at old +11 / new +27 -- a clean
+    +16 shift. In current recordings new[0:8] is that same player's PlayerSpawn
+    character key, so it is filled in from the file rather than left zero.
+    """
+    def fn(payload: bytes, target: int) -> bytes:
+        out = bytearray(16) + bytearray(payload)
+        key = keymap.get(struct.unpack_from("<I", payload, 0)[0])
+        if key is not None:
+            struct.pack_into("<Q", out, 0, key)
+        return pad_tail(bytes(out), target)
+    return fn
+
+
+def spawn_key_map(data: bytearray, names: dict) -> dict:
+    """Object id -> character key, read off the file's PlayerSpawn packets.
+
+    Runs before migration, while PlayerSpawn is still the old size. Both layouts
+    keep the key at payload +0 and the spawning player's object id in the segment
+    header, so this does not care which one it is looking at.
+    """
+    out = {}
+    want = names.get("PlayerSpawn")
+    if want is None:
+        return out
+    replay_len = struct.unpack_from("<i", data, B.OFF_REPLAY_LEN)[0]
+    off = 0
+    while off < replay_len:
+        b = B.DATA_START + off
+        op, ln = struct.unpack_from("<HH", data, b)
+        if op == want and ln >= 8:
+            oid = struct.unpack_from("<I", data, b + 8)[0]
+            key = struct.unpack_from("<Q", data, b + B.SEG_HEADER)[0]
+            if oid and key:
+                out[oid] = key
+        off += B.SEG_HEADER + ln
+    return out
+
+
 # Each hypothesis is {packet: migrate(payload, target) -> bytes}.
 HYPOTHESES = {
     "opcodes-only": {},
@@ -155,7 +220,54 @@ HYPOTHESES["derived-offsets"] = dict(
     Countdown=insert_at(0x006, 16),
 )
 
+# ---------------------------------------------------------------------------
+# The measured layouts.
+#
+# These are not guesses like the hypotheses above. They come from a 7.16h and a
+# 7.55h recording OF THE SAME DUTY (DSR), which makes the comparison controlled:
+# a field that is constant in one is constant in the other, and the same NPCs and
+# the same arena appear in both. Each packet was pinned separately:
+#
+#   PlayerSpawn   proven, not inferred. Every field was located by cross-
+#                 referencing the party-portrait packet, whose customize block,
+#                 job byte and both dye channels are byte-identical to the
+#                 spawn's. That puts job at old 149 / new 151 (+2), and gear,
+#                 dye2, facewear, name and customize all at +4. The two 2-byte
+#                 inserts therefore fall in (126,140) and (157,164) -- both runs
+#                 of zero padding in BOTH patches, so the exact byte within them
+#                 doesn't matter -- and the remaining 4 land in the tail, which
+#                 is zero in both (old 648-656, new 652-664).
+#
+#   NpcSpawn      same shape, one step less certain. A per-byte value-distribution
+#                 profile gives a clean step: +0 up to old 115, +2 from old 124,
+#                 +4 from old 148 onward, tail zero in both. Scanning every split
+#                 in those windows, offsets 117-124 all score identically (the
+#                 bytes there are equivalent) and 148 wins the second. Worth 38
+#                 points over pad-tail across 648 offsets, so the inserts are
+#                 real; which byte inside the first window is arbitrary.
+#
+#   ActorControlSelf  confirmed pad-tail: the 8 added bytes are zero in all 4488
+#                 current-patch samples, and the first 32 bytes are byte-identical
+#                 between patches on matched packets.
+#
+#   Countdown     confirmed +16 at the front: object id old +0 -> new +16, second
+#                 id old +4 -> new +20, name old +11 -> new +27. new[0:8] is the
+#                 player's character key, so countdown_migrate fills it in.
+#
+#   InitZone      NOT a pure insertion - it drops 8 bytes (old 0x18-0x1f) as well
+#                 as adding 32, so no insert plan can express it. Use
+#                 --template-from with a current recording of the same duty; that
+#                 starts from a payload the live client already accepted.
+HYPOTHESES["measured"] = dict(
+    {n: pad_tail for n in TARGET_SIZE},
+    PlayerSpawn=insert_many((126, 2), (157, 2)),   # remaining 4 pad the tail
+    NpcSpawn=insert_many((124, 2), (148, 2)),      # remaining 4 pad the tail
+    # ActorControlSelf stays pad_tail; Countdown is filled in by main() so it can
+    # see the whole file, and InitZone by --template-from.
+)
+
 HYPOTHESIS_NOTES = {
+    "measured": "layouts measured off the 7.16h/7.55h same-duty DSR pair (see comment)",
     "derived-offsets": "insertion points derived from the 7.16h/7.38 same-duty pair",
     "opcodes-only": "control: opcodes remapped, payloads untouched (the current, broken output)",
     "pad-tail": "every short payload zero-extended at the end",
@@ -164,28 +276,59 @@ HYPOTHESIS_NOTES = {
 }
 
 
+def opcode_in_patch(patch: str, hops: dict, latest_op: int) -> int:
+    """What opcode a current packet had back in `patch`.
+
+    The name tables only pin the latest patch, so the number is carried backwards
+    down the diff chain instead - the same trick PatchChain uses to name old
+    packets from one hand-maintained table.
+    """
+    latest = B.VERSION_CHAIN[-1]
+    if patch == latest:
+        return latest_op
+    fwd = {op: op for op in B.patch_universe(hops, patch)}
+    for v in B.chain_between(patch, latest):
+        m = hops[v]["map"]
+        fwd = {orig: m[cur] for orig, cur in fwd.items() if cur in m}
+    for orig, cur in fwd.items():
+        if cur == latest_op:
+            return orig
+    raise B.Fatal(f"InitZone can't be traced back to {patch}")
+
+
 def read_initzone(path: str, names: dict) -> bytes:
-    """Pull the first InitZone payload out of an already-current recording."""
+    """Pull the first InitZone payload out of a recent recording.
+
+    The template does not have to be on the latest patch - its opcode is resolved
+    in whatever patch it actually is. What it does have to be is new enough that
+    its InitZone is already the target size, and that is checked directly rather
+    than against a list of patch names that goes stale.
+
+    Prefer a template recorded in the SAME duty: InitZone carries the territory,
+    the content id and the arena spawn position, so a same-duty template needs
+    almost nothing transplanted into it.
+    """
     d = B.read_replay(path)
     chain, hops = B.load_baked()
     hist = B.opcode_histogram(d, B.segment_offsets(d))
     best, _ = B.detect_patch(hops, hist, chain[-1])
-    # Any patch whose InitZone is already the target size will do -- the layout has
-    # been stable across 7.51-7.55h -- but the opcodes must be current so we can
-    # find the packet at all.
-    if not best or best[0] not in ("7.51", "7.51h", "7.51h2", "7.55", "7.55h"):
-        raise B.Fatal(f"{path} reads as {best[0] if best else 'unknown'}; the template must be a "
-                      f"recent recording whose InitZone is already {TARGET_SIZE['InitZone']} bytes")
-    want = names["InitZone"]
+    if not best:
+        raise B.Fatal(f"can't tell what patch {path} is on")
+    want = opcode_in_patch(best[0], hops, names["InitZone"])
     rl = struct.unpack_from("<i", d, B.OFF_REPLAY_LEN)[0]
     off = 0
     while off < rl:
         b = B.DATA_START + off
         op, ln = struct.unpack_from("<HH", d, b)
         if op == want:
+            if ln != TARGET_SIZE["InitZone"]:
+                raise B.Fatal(
+                    f"{path} reads as {best[0]} and its InitZone is {ln} bytes, not "
+                    f"{TARGET_SIZE['InitZone']} - the template must be recent enough to "
+                    f"already have the current layout")
             return bytes(d[b + B.SEG_HEADER: b + B.SEG_HEADER + ln])
         off += B.SEG_HEADER + ln
-    raise B.Fatal(f"no InitZone packet found in {path}")
+    raise B.Fatal(f"no InitZone packet found in {path} (looked for opcode 0x{want:04x} as {best[0]})")
 
 
 def latest_names():
@@ -305,11 +448,20 @@ def main(argv=None):
             f"would be picked by {target_patch} opcode numbers that mean something else in {best[0]}.)"
         )
 
+    # Countdown's new head starts with the character key, which only the whole
+    # file can supply - so it is bound here rather than in the table above.
+    keymap = spawn_key_map(data, names)
+    HYPOTHESES["measured"]["Countdown"] = countdown_migrate(keymap)
+    print(f"character keys for Countdown: {len(keymap)} players")
+
     if args.template_from:
         tmpl = read_initzone(args.template_from, names)
         HYPOTHESES["initzone-template"] = dict({n: pad_tail for n in TARGET_SIZE},
                                                InitZone=initzone_from_template(tmpl))
         HYPOTHESIS_NOTES["initzone-template"] = "InitZone taken from a working recording, ids transplanted"
+        # The measured set is right about everything except InitZone, which no
+        # insert plan can express; give it the template too.
+        HYPOTHESES["measured"]["InitZone"] = initzone_from_template(tmpl)
         print(f"template InitZone: {len(tmpl)} bytes from {os.path.basename(args.template_from)}")
 
     todo = sorted(HYPOTHESES) if args.all_hypotheses else [args.hypothesis]
