@@ -60,6 +60,12 @@ public sealed class CharacterAppearance
     public bool HideHeadgear { get; set; }
     public bool HideWeapon { get; set; }
 
+    /// <summary>The status icon beside the name, as an <c>OnlineStatus</c> sheet row -
+    /// see <see cref="OnlineStatusData"/>.  Written to the spawn packet and to every
+    /// category-504 ActorControl the character owns, which is what makes it stick for
+    /// the length of the playback.</summary>
+    public byte OnlineStatus { get; set; }
+
     public CharacterAppearance Clone() => new()
     {
         Customize = Customize.Clone(),
@@ -72,6 +78,7 @@ public sealed class CharacterAppearance
         HomeWorld = HomeWorld,
         HideHeadgear = HideHeadgear,
         HideWeapon = HideWeapon,
+        OnlineStatus = OnlineStatus,
     };
 
     public bool SameAs(CharacterAppearance o) =>
@@ -81,7 +88,8 @@ public sealed class CharacterAppearance
         MainHand.SameAs(o.MainHand) && OffHand.SameAs(o.OffHand) &&
         Facewear == o.Facewear && Title == o.Title &&
         CurrentWorld == o.CurrentWorld && HomeWorld == o.HomeWorld &&
-        HideHeadgear == o.HideHeadgear && HideWeapon == o.HideWeapon;
+        HideHeadgear == o.HideHeadgear && HideWeapon == o.HideWeapon &&
+        OnlineStatus == o.OnlineStatus;
 
     /// <summary>Dress in a job's artifact gear, the same set the anonymizer uses.</summary>
     public void ApplyJobGear(JobGear g)
@@ -145,6 +153,11 @@ public sealed class CharacterRecord
 /// to the PartyList roster, and the portrait's item
 /// ids are edited as their own field. There is no model-to-item mapping without
 /// the game's data files, so the two cannot be kept in sync automatically.</para>
+///
+/// <para>The status icon is the one field that is not a packet field alone but a
+/// timeline: the spawn packet opens with it and a run of category-504 ActorControls
+/// re-sends it, so it is written to both, joined on the actor id the spawn's own
+/// segment header carries.  See <see cref="CharacterLayout.ActorControlSetStatusIcon"/>.</para>
 /// </summary>
 public static class CharacterEditor
 {
@@ -248,6 +261,7 @@ public static class CharacterEditor
             HomeWorld = BinaryPrimitives.ReadUInt16LittleEndian(span[(p + lay.HomeWorld)..]),
             HideHeadgear = (flags & CharacterLayout.DisplayHideHeadgear) != 0,
             HideWeapon = (flags & CharacterLayout.DisplayHideWeapon) != 0,
+            OnlineStatus = span[p + lay.OnlineStatus],
         };
     }
 
@@ -266,7 +280,10 @@ public static class CharacterEditor
     /// <para>Only fields the user actually changed are written. That matters
     /// because a recording can hold a portrait block that disagrees with its own
     /// spawn packet, and writing a whole appearance would quietly overwrite the
-    /// half nobody asked to touch.</para>
+    /// half nobody asked to touch.  It matters twice for the status icon, whose
+    /// ActorControls are rewritten wholesale for the character: untouched, they are
+    /// a timeline the anonymizer may already have flattened, and a status nobody
+    /// edited should stay flattened.</para>
     /// </summary>
     /// <returns>A status fragment for the log, empty when nothing was edited.</returns>
     /// <param name="keyRemap">
@@ -291,8 +308,41 @@ public static class CharacterEditor
 
         var span = bytes.AsSpan();
         var replayLen = BinaryPrimitives.ReadInt32LittleEndian(span[ReplayFormat.OffReplayLen..]);
-        int spawnsWritten = 0, portraitsWritten = 0, rostersWritten = 0;
+        int spawnsWritten = 0, portraitsWritten = 0, rostersWritten = 0, iconsWritten = 0;
         var touched = new HashSet<ulong>();
+
+        // Which actor id belongs to whom, for the status-icon pass below. It needs
+        // its own sweep rather than being picked up as the main loop goes: an
+        // ActorControl is only tied to a character through the actor id its segment
+        // header names, and nothing guarantees a character's spawn packet comes
+        // before every ActorControl that talks about them.
+        var iconOwners = new Dictionary<uint, ulong>();
+        if (plans.Values.Any(p => p.TouchesStatusIcon))
+        {
+            var scan = 0;
+            while (scan < replayLen)
+            {
+                var b = ReplayFormat.DataStart + scan;
+                int op = BinaryPrimitives.ReadUInt16LittleEndian(span[b..]);
+                int len = BinaryPrimitives.ReadUInt16LittleEndian(span[(b + 2)..]);
+                var lay = op == spawnOp ? CharacterLayout.SpawnLayoutFor(len) : null;
+                if (lay is not null)
+                {
+                    var cid = BinaryPrimitives.ReadUInt64LittleEndian(
+                        span[(b + ReplayFormat.SegHeader + lay.CharacterKey)..]);
+                    var oid = BinaryPrimitives.ReadUInt32LittleEndian(span[(b + 8)..]);
+                    if (oid != 0 && plans.TryGetValue(cid, out var pl) && pl.TouchesStatusIcon)
+                        iconOwners[oid] = cid;
+                }
+                scan += ReplayFormat.SegHeader + len;
+            }
+        }
+
+        var iconOps = iconOwners.Count == 0
+            ? Array.Empty<int>()
+            : CharacterLayout.ActorControlOpNames
+                .Select(n => PatchChain.Lookup(filePatch, n))
+                .Where(o => o is not null).Select(o => o!.Value).ToArray();
 
         var off = 0;
         while (off < replayLen)
@@ -338,13 +388,28 @@ public static class CharacterEditor
                     touched.Add(cid);
                 }
             }
+            else if (Array.IndexOf(iconOps, op) >= 0 && len >= CharacterLayout.ActorControlMinLength)
+            {
+                // Whose icon this is comes from the segment header, not the payload.
+                var oid = BinaryPrimitives.ReadUInt32LittleEndian(span[(b + 8)..]);
+                var cat = BinaryPrimitives.ReadUInt16LittleEndian(span[(p + CharacterLayout.ActorControlCategory)..]);
+                if (cat == CharacterLayout.ActorControlSetStatusIcon &&
+                    iconOwners.TryGetValue(oid, out var cid) && plans.TryGetValue(cid, out var plan))
+                {
+                    BinaryPrimitives.WriteUInt32LittleEndian(
+                        span[(p + CharacterLayout.ActorControlParam1)..], plan.Want.OnlineStatus);
+                    iconsWritten++;
+                    touched.Add(cid);
+                }
+            }
             off += ReplayFormat.SegHeader + len;
         }
 
-        if (spawnsWritten == 0 && portraitsWritten == 0 && rostersWritten == 0)
+        if (spawnsWritten == 0 && portraitsWritten == 0 && rostersWritten == 0 && iconsWritten == 0)
             return $" · character edits ({plans.Count}) matched nothing in this export";
         return $" · edited {touched.Count} character{(touched.Count == 1 ? "" : "s")} " +
-               $"({spawnsWritten} spawns, {portraitsWritten} portraits, {rostersWritten} roster entries)";
+               $"({spawnsWritten} spawns, {portraitsWritten} portraits, {rostersWritten} roster entries, " +
+               $"{iconsWritten} status icons)";
     }
 
     /// <summary>Which fields differ between the original and the desired look.</summary>
@@ -362,6 +427,7 @@ public static class CharacterEditor
         public readonly bool CurrentWorld;
         public readonly bool HomeWorld;
         public readonly bool DisplayFlags;
+        public readonly bool OnlineStatus;
         public readonly bool[] GearModel = new bool[CharacterLayout.GearSlots];
         public readonly bool[] GearDye = new bool[CharacterLayout.GearSlots];
         public readonly bool[] PortraitItem = new bool[CharacterLayout.GearSlots];
@@ -377,6 +443,7 @@ public static class CharacterEditor
             CurrentWorld = was.CurrentWorld != want.CurrentWorld;
             HomeWorld = was.HomeWorld != want.HomeWorld;
             DisplayFlags = was.HideHeadgear != want.HideHeadgear || was.HideWeapon != want.HideWeapon;
+            OnlineStatus = was.OnlineStatus != want.OnlineStatus;
             for (var s = 0; s < CharacterLayout.GearSlots && s < want.Gear.Length && s < was.Gear.Length; s++)
             {
                 GearModel[s] = was.Gear[s].Model != want.Gear[s].Model || was.Gear[s].Variant != want.Gear[s].Variant;
@@ -389,7 +456,7 @@ public static class CharacterEditor
 
         public bool TouchesSpawn =>
             AnyCustomize || Weapons || Facewear || Title || CurrentWorld || HomeWorld ||
-            DisplayFlags || GearModel.Any(x => x) || GearDye.Any(x => x);
+            DisplayFlags || OnlineStatus || GearModel.Any(x => x) || GearDye.Any(x => x);
 
         public bool TouchesPortrait =>
             AnyCustomize || Facewear || GearDye.Any(x => x) || PortraitItem.Any(x => x);
@@ -397,6 +464,11 @@ public static class CharacterEditor
         /// <summary>The roster carries the home world and nothing else this editor
         /// touches, so it is only rewritten when that actually moved.</summary>
         public bool TouchesPartyList => HomeWorld;
+
+        /// <summary>The status icon is re-sent by ActorControl after the spawn, so a
+        /// changed status has to be chased through those too - see the note on
+        /// <see cref="CharacterLayout.ActorControlSetStatusIcon"/>.</summary>
+        public bool TouchesStatusIcon => OnlineStatus;
 
         public bool Any => TouchesSpawn || TouchesPortrait || TouchesPartyList;
     }
@@ -431,6 +503,8 @@ public static class CharacterEditor
             BinaryPrimitives.WriteUInt16LittleEndian(span[(p + lay.Title)..], a.Title);
         if (plan.CurrentWorld)
             BinaryPrimitives.WriteUInt16LittleEndian(span[(p + lay.CurrentWorld)..], a.CurrentWorld);
+        if (plan.OnlineStatus)
+            span[p + lay.OnlineStatus] = a.OnlineStatus;
         if (plan.HomeWorld)
             BinaryPrimitives.WriteUInt16LittleEndian(span[(p + lay.HomeWorld)..], a.HomeWorld);
         if (!plan.DisplayFlags) return;

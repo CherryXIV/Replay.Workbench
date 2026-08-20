@@ -12,7 +12,10 @@ namespace ReplayWorkbench.Core;
 /// <item>PlayerSpawn (664B now, 656B on early Dawntrail recordings - the layout is
 /// picked from the packet's own length) - the in-arena model: race + AF gear
 /// (model IDs) + facewear/glasses id (stripped to 0) + title id (stripped to 0)
-/// + current/home world (both set to <see cref="Anonymizer.AnonymousWorld"/>)</item>
+/// + current/home world (both set to <see cref="Anonymizer.AnonymousWorld"/>)
+/// + status icon (set to <see cref="OnlineStatusData.InDuty"/>)</item>
+/// <item>ActorControl category 504 - the status icon again, re-sent after the
+/// spawn; left alone it puts the original icon back seconds into the playback</item>
 /// <item>PartyList (3672B = 8x456 + trailer; matched by length) - the party panel's
 /// roster, which keeps its own copy of each member's home world</item>
 /// <item>party-member appearance (1408B = 8x176, gear stored as item IDs;
@@ -71,6 +74,10 @@ public static class Anonymizer
         var span = bytes.AsSpan();
         var replayLen = BinaryPrimitives.ReadInt32LittleEndian(span[ReplayFormat.OffReplayLen..]);
         var spawnOp = PatchChain.Lookup(filePatch, "PlayerSpawn");
+        // The status icon is re-sent after the spawn; see the note in pass 3.
+        var iconOps = CharacterLayout.ActorControlOpNames
+            .Select(n => PatchChain.Lookup(filePatch, n))
+            .Where(o => o is not null).Select(o => o!.Value).ToArray();
 
         // Pass 1: gather the cast + object IDs from PlayerSpawn. Each PlayerSpawn's
         // segment-header oid (b+8) is the spawning player's own actor/object ID.
@@ -165,7 +172,7 @@ public static class Anonymizer
         // Pass 3: race (+ gear) on spawn and appearance packets, and the name field.
         // The per-character name is written here, after the sweep, so it is the last
         // word on who each spawn packet belongs to.
-        int spawns = 0, dressed = 0, rosters = 0;
+        int spawns = 0, dressed = 0, rosters = 0, icons = 0;
         off = 0;
         while (off < replayLen)
         {
@@ -203,6 +210,11 @@ public static class Anonymizer
                 // it, so it does not name anyone on its own - but a rare one narrows
                 // the field hard, and it survives every other pass here untouched.
                 BinaryPrimitives.WriteUInt16LittleEndian(span[(p + lay.Title)..], 0);
+                // A status icon is not a name, but the mentor crowns and the like are
+                // worn by few enough people to narrow a roster, and "Role-playing" on
+                // one member is the sort of detail that identifies a group. Everyone is
+                // set to In Duty - see OnlineStatusData.InDuty for why that rather than 0.
+                bytes[p + lay.OnlineStatus] = OnlineStatusData.InDuty;
                 // Home world is a short list a real person is on, and a visitor's
                 // current world says which one they travelled to; both narrow the
                 // party hard, so everyone is moved to the same world instead.
@@ -257,6 +269,19 @@ public static class Anonymizer
                     rosters++;
                 }
             }
+            else if (Array.IndexOf(iconOps, op) >= 0 && len >= CharacterLayout.ActorControlMinLength &&
+                     BinaryPrimitives.ReadUInt16LittleEndian(span[(p + CharacterLayout.ActorControlCategory)..]) ==
+                     CharacterLayout.ActorControlSetStatusIcon)
+            {
+                // The spawn byte above is not the last word on the icon: these carry it
+                // again, later, and the client acts on them from then on. They are
+                // rewritten without asking whose they are - unlike the fields above,
+                // every character in the recording is being anonymized to the same
+                // status, so the actor id the segment header names does not matter.
+                BinaryPrimitives.WriteUInt32LittleEndian(
+                    span[(p + CharacterLayout.ActorControlParam1)..], OnlineStatusData.InDuty);
+                icons++;
+            }
             off += ReplayFormat.SegHeader + len;
         }
 
@@ -288,7 +313,7 @@ public static class Anonymizer
         }
 
         var note = $" · anonymized {roster.Count} players ({spawns} spawns, {dressed} dressed, " +
-                   $"{rosters} roster entries, " +
+                   $"{rosters} roster entries, {icons} status icons, " +
                    $"{roster.Count} names→{nameHits} refs, {idMap.Count} ids→{idHits} refs";
         note += keyMap.Count > 0 ? $", {keyMap.Count} keys→{keyHits} refs)" : ")";
         return new AnonymizeResult { Note = note, KeyRemap = keyMap };

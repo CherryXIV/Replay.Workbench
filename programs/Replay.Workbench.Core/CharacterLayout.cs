@@ -83,6 +83,23 @@ public sealed record SpawnLayout
     /// a player toggles those off on the character screen.</summary>
     public required int Display { get; init; }
 
+    /// <summary>
+    /// The status icon beside the character's name (u8), as a row id in the game's
+    /// <c>OnlineStatus</c> sheet - see <see cref="OnlineStatusData"/>.
+    ///
+    /// <para>Pinned by ten recordings of one character that differ only in the status
+    /// set in the search-info window: this is the sole byte of the spawn packet that
+    /// moves between them, and each value is exactly its sheet row. NPCs read 0,
+    /// which is the anchor on the other side - the field is only ever populated for
+    /// a player.</para>
+    ///
+    /// <para>It is not the only copy. <see cref="CharacterLayout.ActorControlCategory"/>
+    /// carries the same value in packets that land after the spawn, and those are
+    /// what the client acts on from then on, so a status edit has to write both -
+    /// see <see cref="CharacterEditor"/>.</para>
+    /// </summary>
+    public required int OnlineStatus { get; init; }
+
     public required int Job { get; init; }
 
     /// <summary>10 armor slots, 4 bytes each: [model u16][variant u8][dye u8].</summary>
@@ -132,6 +149,7 @@ public static class CharacterLayout
         Title = 16,
         CurrentWorld = 20,
         HomeWorld = 22,
+        OnlineStatus = 0x1B,
         Weapon = 0x30,
         WeaponSub = 0x38,
         Display = 0x74,
@@ -150,13 +168,14 @@ public static class CharacterLayout
     {
         Length = 656,
         CharacterKey = 0,
-        // Inferred, not measured: every sample carrying a title or a cross-world
-        // player is 664-byte. All three sit in the head, which the note above records
-        // as not having moved between the two layouts, so they keep their offsets
-        // here unless a 656-byte sample says otherwise.
+        // Inferred, not measured: every sample carrying a title, a cross-world
+        // player or a set online status is 664-byte. All four sit in the head, which
+        // the note above records as not having moved between the two layouts, so they
+        // keep their offsets here unless a 656-byte sample says otherwise.
         Title = 16,
         CurrentWorld = 20,
         HomeWorld = 22,
+        OnlineStatus = 0x1B,
         Weapon = 0x30,
         WeaponSub = 0x38,
         Display = 0x74,
@@ -238,6 +257,48 @@ public static class CharacterLayout
     /// <summary>Home world only - the spawn packet's <see cref="SpawnLayout.CurrentWorld"/>
     /// has no counterpart here.</summary>
     public const int PartyListHomeWorld = 80;
+
+    // ---- ActorControl: the status icon after the spawn -----------------------
+    //
+    // The spawn packet is not the last word on a character's status icon: an
+    // ActorControl of category 504 carries it again, and a recording holds several.
+    // Editing only the spawn leaves the icon correct until the first of these plays
+    // and puts the original back.
+    //
+    // Measured on the ten status recordings: each holds four category-504 packets,
+    // and the one that lands a few seconds in matches its own spawn byte in all ten
+    // files. The earlier one reads 15 - Viewing Cutscene, the duty load-in - in every
+    // recording whose owner had set no status, so these are not copies of the spawn
+    // to be trusted individually; they are a timeline, and the whole timeline has to
+    // be rewritten for the icon to hold for the length of the playback.
+    //
+    // Whose status it is comes from the *segment header's* object id, not the
+    // payload - which is a different join from every other packet here, and the
+    // reason a status edit needs the character's actor id rather than their
+    // character key. The PlayerSpawn's own segment header carries that actor id,
+    // which is what bridges the two.
+
+    /// <summary>ActorControl category that sets a character's status icon.</summary>
+    public const int ActorControlSetStatusIcon = 504;
+
+    /// <summary>u16 category, at the head of every ActorControl payload.</summary>
+    public const int ActorControlCategory = 0;
+
+    /// <summary>First u32 argument. For category 504 it is the OnlineStatus row id.</summary>
+    public const int ActorControlParam1 = 4;
+
+    /// <summary>Smallest ActorControl payload that has a category and one argument.</summary>
+    public const int ActorControlMinLength = 8;
+
+    /// <summary>
+    /// The three ActorControl packets, by IPC name. Only the plain one was seen
+    /// carrying category 504 - all 40 across the ten recordings - but all three share
+    /// the category/argument head and name their subject in the segment header, so
+    /// all three are read and rewritten rather than betting the icon on which
+    /// variant a future recording happens to use.
+    /// </summary>
+    public static readonly string[] ActorControlOpNames =
+        { "ActorControl", "ActorControlSelf", "ActorControlTarget" };
 
     /// <summary>Armor slot order, shared by both packets.</summary>
     public static readonly string[] GearSlotNames =

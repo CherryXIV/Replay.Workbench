@@ -4,7 +4,8 @@ namespace ReplayWorkbench.App;
 
 /// <summary>
 /// Per-character appearance editor: the customize block, gear and dyes, weapons,
-/// facewear, title, worlds and the display toggles, for one player in the recording.
+/// facewear, title, worlds, status icon and the display toggles, for one player in
+/// the recording.
 /// </summary>
 internal sealed class CharacterForm : Form
 {
@@ -21,6 +22,7 @@ internal sealed class CharacterForm : Form
     private readonly NumericUpDown _title = new();
     private readonly NumericUpDown _curWorld = new();
     private readonly NumericUpDown _homeWorld = new();
+    private readonly ComboBox _online = new() { DropDownStyle = ComboBoxStyle.DropDownList };
     private readonly CheckBox _hideHead = new() { Text = "Hide headgear" };
     private readonly CheckBox _hideWeapon = new() { Text = "Hide weapon" };
 
@@ -288,7 +290,7 @@ internal sealed class CharacterForm : Form
 
         var rowH = Theme.Mono.Height + 12;
         var labelW = CharacterLayout.GearSlotNames
-            .Concat(new[] { "Main hand", "Facewear", "Title", "Current world", "Home world" })
+            .Concat(new[] { "Main hand", "Facewear", "Title", "Current world", "Home world", "Status" })
             .Max(s => TextRenderer.MeasureText(s, Theme.MonoSmall).Width) + 10;
         int[] widths =
         {
@@ -388,6 +390,24 @@ internal sealed class CharacterForm : Form
             "The world this character belongs to. Written to the spawn packet and to " +
             "the party roster, which keeps its own copy.");
         host.Controls.Add(_homeWorld);
+        y += rowH;
+
+        host.Controls.Add(SlotLabel("Status", y, labelW, rowH));
+        _online.Font = Theme.Mono;
+        _online.BackColor = Theme.Panel2;
+        _online.ForeColor = Theme.Ink;
+        _online.FlatStyle = FlatStyle.Flat;
+        foreach (var (id, name) in OnlineStatusData.All) _online.Items.Add(new Choice(id, name));
+        _online.SetBounds(14 + labelW, y,
+            Math.Min(rightEdge - 20 - labelW, LongestStatusWidth()), rowH - 4);
+        _tips.SetToolTip(_online,
+            "The status icon beside the character's name - Busy, the mentor crowns, " +
+            "and so on. Written to the spawn packet and to every ActorControl that " +
+            "re-sends it later, so it holds for the whole playback. Anonymizing sets " +
+            "everyone to In Duty. Away from Keyboard and Looking to Meld Materia are " +
+            "listed but never recorded by the game, so setting one shows something " +
+            "the original recording could not have.");
+        host.Controls.Add(_online);
         y += rowH + 8;
 
         foreach (var (box, tip) in new[]
@@ -491,6 +511,10 @@ internal sealed class CharacterForm : Form
         public override string ToString() => $"{Name} ({Id})";
     }
 
+    /// <summary>Width for the status combo, from the longest entry it can show.</summary>
+    private static int LongestStatusWidth() =>
+        OnlineStatusData.All.Max(e => TextRenderer.MeasureText($"{e.Name} ({e.Id})", Theme.Mono).Width) + 34;
+
     /// <summary>Width for a spinner that must show <paramref name="sample"/> in full,
     /// including the up/down buttons the control adds.</summary>
     private static int NumWidth(string sample) =>
@@ -551,6 +575,7 @@ internal sealed class CharacterForm : Form
         _title.Value = a.Title;
         _curWorld.Value = a.CurrentWorld;
         _homeWorld.Value = a.HomeWorld;
+        Select(_online, a.OnlineStatus);
         _hideHead.Checked = a.HideHeadgear;
         _hideWeapon.Checked = a.HideWeapon;
 
@@ -610,6 +635,7 @@ internal sealed class CharacterForm : Form
             Title = (ushort)_title.Value,
             CurrentWorld = (ushort)_curWorld.Value,
             HomeWorld = (ushort)_homeWorld.Value,
+            OnlineStatus = ((Choice?)_online.SelectedItem)?.Id ?? OnlineStatusData.InDuty,
             HideHeadgear = _hideHead.Checked,
             HideWeapon = _hideWeapon.Checked,
         };
