@@ -1094,6 +1094,10 @@ function stripPartyPortraitsIfChecked(bytes){
      PartyList    (3672B = 8x456 + a 24-byte trailer; matched by length) — the
        party panel's roster, which keeps its own copy of each member's home world
        and would otherwise go on naming worlds the spawn packets no longer admit to
+     ActorControl category 504   — the status icon again, re-sent after the spawn.
+       The spawn byte is not the last word on it: these land seconds in and the
+       client acts on them from then on, so stripping only the spawn leaves the
+       icon correct until the first of these plays and puts the original back.
      plus every name string, replaced length-preserving across the file.
    AF gear comes from JOB_AF_GEAR (afgear.js): item IDs for the appearance packet,
    [model,variant] armor + [model,base,variant] weapon for the spawn packet.
@@ -1128,17 +1132,25 @@ function stripPartyPortraitsIfChecked(bytes){
      values across the party, and two members reading 65/81 and 65/408 — visitors
      on the recorder's own world 65. Those two are what tell the fields apart; a
      party sitting at home would have shown one repeated number and proved nothing.
+   onlineStatus: the status icon beside the name (u8) — Busy, Role-playing, the
+     mentor crowns — as a row id in the game's OnlineStatus sheet, used raw with no
+     offset. Pinned by ten recordings of one character differing only in the status
+     set in the search-info window: it is the sole byte of the spawn packet that
+     moves between them, reading 12 for Busy, 22 for Role-playing, 23 for Looking
+     for Party and 27-30 for the four mentor crowns — each exactly its sheet row.
+     NPCs read 0, which is the anchor on the other side.
    face: facewear/glasses model id (u16) between the dye array and the name.
      0 = none; confirmed against a known replay (Vivi=457).
    weapon/weaponSub: mainhand + offhand, each a u64 packed as
      [model u16][base u16][variant u16][dye u16]. Confirmed by diffing two
      captures that changed only the weapon glamour (44732 -> 2001/76/2). */
-/* title/curWorld/homeWorld are inferred for 656, not measured: every sample
-   carrying a title or a cross-world player is 664-byte. All three sit in the head,
-   which the note above records as not having moved between the two layouts. */
+/* title/curWorld/homeWorld/onlineStatus are inferred for 656, not measured: every
+   sample carrying a title, a cross-world player or a set status is 664-byte. All
+   four sit in the head, which the note above records as not having moved between
+   the two layouts. */
 const SPAWN_LAYOUTS=[
-  {len:664, key:0, title:16, curWorld:20, homeWorld:22, weapon:0x30, weaponSub:0x38, display:0x74, job:151, gear:540, dye2:580, face:590, name:594, cust:626},
-  {len:656, key:0, title:16, curWorld:20, homeWorld:22, weapon:0x30, weaponSub:0x38, display:0x74, job:149, gear:536, dye2:576, face:586, name:590, cust:622},
+  {len:664, key:0, title:16, curWorld:20, homeWorld:22, onlineStatus:0x1B, weapon:0x30, weaponSub:0x38, display:0x74, job:151, gear:540, dye2:580, face:590, name:594, cust:626},
+  {len:656, key:0, title:16, curWorld:20, homeWorld:22, onlineStatus:0x1B, weapon:0x30, weaponSub:0x38, display:0x74, job:149, gear:536, dye2:576, face:586, name:590, cust:622},
 ];
 const spawnLayoutFor=(len)=>SPAWN_LAYOUTS.find(l=>l.len===len)||null;
 // Sizes and flags that hold in every known layout.
@@ -1166,6 +1178,23 @@ const PL_LEN=3672, PL_STRIDE=456, PL_MEMBERS=8, PL_KEY=40, PL_HOME=80;
 // narrowing who the party was, and eight players scattered across eight invented
 // worlds would say more about them than eight on one.
 const ANON_WORLD=91;
+// The status icon every anonymized character is given: In Duty, row 43 of the
+// OnlineStatus sheet. The honest answer rather than a blank — a recording only
+// exists because someone was in a duty, so this is what their icon would have been
+// had they set no status at all, and zeroing the field instead would leave every
+// anonymized player reading the value the game gives NPCs. Worth stripping because
+// the mentor crowns and the like are worn by few enough people to narrow a roster,
+// and "Role-playing" on one member is the sort of detail that identifies a group.
+const ANON_ONLINE_STATUS=43;
+// ActorControl carries the status icon again after the spawn: category at +0 of the
+// payload, the status itself as the first u32 argument at +4. Whose it is comes from
+// the *segment header's* object id, not the payload — but the anonymizer never has to
+// ask, since every character in the file is going to the same status anyway.
+// Only the plain ActorControl was seen carrying category 504 — all 40 across the ten
+// status recordings — but all three variants share the category/argument head, so all
+// three are rewritten rather than betting the icon on which one a future recording uses.
+const AC_STATUS_ICON=504, AC_CATEGORY=0, AC_PARAM1=4, AC_MIN_LEN=8;
+const AC_OP_NAMES=["ActorControl","ActorControlSelf","ActorControlTarget"];
 
 // A valid generic customize for (race, gender): default features, mid tones.
 function customizeFor(race,gender){
@@ -1204,6 +1233,7 @@ function applyAnonymizeIfChecked(bytes){
   const replayLen=dv.getInt32(OFF_REPLAY_LEN,true);
   const spawnTable=patchTable(filePatch);
   const spawnOp=spawnTable ? spawnTable.PlayerSpawn : null;
+  const iconOps=new Set(spawnTable ? AC_OP_NAMES.map(n=>spawnTable[n]).filter(o=>o!=null) : []);
   const td=new TextDecoder();
 
   // Pass 1: gather real names + object IDs from PlayerSpawn. Each PlayerSpawn's
@@ -1236,7 +1266,7 @@ function applyAnonymizeIfChecked(bytes){
   }
 
   // Pass 2: race (+ gear) on spawn and appearance packets.
-  let spawns=0, appears=0, dressed=0, rosters=0;
+  let spawns=0, appears=0, dressed=0, rosters=0, icons=0;
   off=0;
   while(off<replayLen){
     const b=DATA_START+off, op=dv.getUint16(b,true), len=dv.getUint16(b+2,true), p=b+SEG_HEADER;
@@ -1251,6 +1281,7 @@ function applyAnonymizeIfChecked(bytes){
       } else { bytes.fill(0,p+L.gear,p+L.gear+PS_GEAR_N); writeWeapon(dv,p+L.weapon); writeWeapon(dv,p+L.weaponSub); }
       dv.setUint16(p+L.face,0,true); // strip facewear/glasses — it leaks identity
       dv.setUint16(p+L.title,0,true); // a rare title narrows the field hard
+      bytes[p+L.onlineStatus]=ANON_ONLINE_STATUS; // status icon -> In Duty
       // Home world is a short list a real person is on, and a visitor's current
       // world says which one they travelled to; both narrow the party, so everyone
       // is moved to the same world instead.
@@ -1280,6 +1311,10 @@ function applyAnonymizeIfChecked(bytes){
         dv.setUint16(e+PL_HOME,ANON_WORLD,true);
         rosters++;
       }
+    } else if(iconOps.has(op) && len>=AC_MIN_LEN && dv.getUint16(p+AC_CATEGORY,true)===AC_STATUS_ICON){
+      // The spawn byte above is not the last word on the icon — see AC_STATUS_ICON.
+      dv.setUint32(p+AC_PARAM1,ANON_ONLINE_STATUS,true);
+      icons++;
     }
     off+=SEG_HEADER+len;
   }
@@ -1303,7 +1338,7 @@ function applyAnonymizeIfChecked(bytes){
     idHits+=replaceBytes(bytes,need,rep);
   }
 
-  return ` · anonymized ${labels.size} players (${spawns} spawns, ${dressed} dressed, ${rosters} roster entries, ${idMap.size} ids→${idHits} refs)`;
+  return ` · anonymized ${labels.size} players (${spawns} spawns, ${dressed} dressed, ${rosters} roster entries, ${icons} status icons, ${idMap.size} ids→${idHits} refs)`;
 }
 
 // Enable the race dropdown only while "Anonymize players" is checked.
