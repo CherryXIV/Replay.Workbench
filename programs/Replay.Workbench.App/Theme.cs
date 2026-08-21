@@ -7,7 +7,7 @@ namespace ReplayWorkbench.App;
 /// dark slate, phosphor-cyan readouts, amber for the recorder/local player,
 /// monospace data with one humanist sans for chrome.
 /// </summary>
-internal static class Theme
+public static class Theme
 {
     public static readonly Color Bg = FromHex("#0d1117");
     public static readonly Color Panel = FromHex("#141b24");

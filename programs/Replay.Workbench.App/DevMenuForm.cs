@@ -9,96 +9,49 @@ namespace ReplayWorkbench.App;
 /// latest: transpose targets it and the build re-stamp uses it.  Nothing is
 /// persisted - it lives for the life of the process.
 /// </summary>
-internal sealed class DevMenuForm : Form
+/// <remarks>
+/// The whole layout lives in DevMenuForm.Designer.cs and is editable in the
+/// WinForms designer; this file is behaviour only.
+/// </remarks>
+internal sealed partial class DevMenuForm : Form
 {
-    private readonly TextBox _build = new();
-    private readonly TextBox _json = new();
-    private readonly Label _hint = new();
-
     public int RegisteredBuild { get; private set; }
     public int RegisteredCount { get; private set; }
 
-    private const string DefaultHint =
-        "Registers this opcode table for the build, then re-parses the loaded file. " +
-        "Plain {name:opcode} maps and a full FFXIVOpcodes opcodes.json are both accepted.";
+    /// <summary>Kept so an error message can be replaced by the original blurb.</summary>
+    private readonly string _defaultHint;
 
     public DevMenuForm()
     {
-        Text = "Register opcodes";
-        BackColor = Theme.Panel;
-        ForeColor = Theme.Ink;
-        Font = Theme.Sans;
-        ClientSize = new Size(620, 470);
-        StartPosition = FormStartPosition.CenterParent;
-        FormBorderStyle = FormBorderStyle.FixedDialog;
-        MinimizeBox = false;
-        MaximizeBox = false;
-        KeyPreview = true;
-
-        var pad = new Panel { Dock = DockStyle.Fill, Padding = new Padding(16), BackColor = Theme.Panel };
-
-        var buildLbl = Caption("Game build number", 0);
-        _build.SetBounds(0, 22, 200, 24);
-        Style(_build);
-
-        var jsonLbl = Caption("Opcodes JSON", 56);
-        _json.SetBounds(0, 78, 588, 280);
-        _json.Multiline = true;
-        _json.ScrollBars = ScrollBars.Vertical;
-        _json.WordWrap = false;
-        _json.PlaceholderText = "{ \"ActorCast\":457, \"ActorControl\":415, \"NpcSpawn\":888, … }";
-        Style(_json);
-
-        _hint.SetBounds(0, 366, 588, 48);
-        _hint.Font = Theme.MonoSmall;
-        _hint.ForeColor = Theme.InkDim;
-        _hint.Text = DefaultHint;
-
-        var prefill = new FlatButton("Prefill latest") { Width = 130, Location = new Point(0, 402) };
-        prefill.Click += (_, _) =>
-        {
-            _build.Text = OpcodeData.LatestGameBuild.ToString();
-            var table = OpcodeData.RawTable(OpcodeData.LatestPatch);
-            _json.Text = table is null ? "" : JsonSerializer.Serialize(table);
-        };
-
-        var cancel = new FlatButton("Cancel") { Width = 100, Location = new Point(378, 402) };
-        cancel.Click += (_, _) => { DialogResult = DialogResult.Cancel; Close(); };
-
-        var apply = new FlatButton("Apply") { Accent = true, Width = 100, Location = new Point(488, 402) };
-        apply.Click += (_, _) => Apply();
-
-        pad.Controls.AddRange(new Control[] { buildLbl, _build, jsonLbl, _json, _hint, prefill, cancel, apply });
-        Controls.Add(pad);
-
-        CancelButton = cancel;
+        InitializeComponent();
+        _defaultHint = hintLabel.Text;
         KeyDown += (_, e) => { if (e.KeyCode == Keys.Escape) Close(); };
-        return;
-
-        static Label Caption(string text, int y) => new()
-        {
-            Text = text, Font = Theme.SansBold, ForeColor = Theme.Ink,
-            AutoSize = true, Location = new Point(0, y),
-        };
     }
 
-    private static void Style(TextBox t)
+    private void OnPrefillClick(object? sender, EventArgs e)
     {
-        t.BackColor = Theme.Panel2;
-        t.ForeColor = Theme.Ink;
-        t.Font = Theme.Mono;
-        t.BorderStyle = BorderStyle.FixedSingle;
+        buildBox.Text = OpcodeData.LatestGameBuild.ToString();
+        var table = OpcodeData.RawTable(OpcodeData.LatestPatch);
+        jsonBox.Text = table is null ? "" : JsonSerializer.Serialize(table);
     }
+
+    private void OnCancelClick(object? sender, EventArgs e)
+    {
+        DialogResult = DialogResult.Cancel;
+        Close();
+    }
+
+    private void OnApplyClick(object? sender, EventArgs e) => Apply();
 
     private void Hint(string message, bool error)
     {
-        _hint.Text = message;
-        _hint.ForeColor = error ? Theme.Danger : Theme.InkDim;
+        hintLabel.Text = message;
+        hintLabel.ForeColor = error ? Theme.Danger : Theme.InkDim;
     }
 
     private void Apply()
     {
-        if (!int.TryParse(_build.Text.Trim(), out var build) || build <= 0)
+        if (!int.TryParse(buildBox.Text.Trim(), out var build) || build <= 0)
         {
             Hint("Enter a valid positive integer build number.", true);
             return;
@@ -107,7 +60,7 @@ internal sealed class DevMenuForm : Form
         Dictionary<string, int>? table;
         try
         {
-            table = NormalizeTable(_json.Text);
+            table = NormalizeTable(jsonBox.Text);
         }
         catch (JsonException ex)
         {
@@ -133,6 +86,7 @@ internal sealed class DevMenuForm : Form
             return;
         }
 
+        Hint(_defaultHint, false);
         RegisteredBuild = build;
         RegisteredCount = table.Count;
         DialogResult = DialogResult.OK;

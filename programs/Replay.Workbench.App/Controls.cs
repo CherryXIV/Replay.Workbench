@@ -4,97 +4,381 @@ using ReplayWorkbench.Core;
 
 namespace ReplayWorkbench.App;
 
+// Everything in this file is public with a parameterless constructor on purpose:
+// that is what the WinForms designer needs in order to instantiate a control on
+// the design surface and list it in the toolbox.  Each one paints itself in the
+// workbench palette from its own constructor, so the design surface shows the
+// dark theme without any colours being baked into the .Designer.cs files.
+
 /// <summary>
 /// A titled panel: header strip with a name on the left and a meta note on the
-/// right, wrapping one content control.  Its height tracks the content's, so the
-/// form can stack cards without relying on nested auto-sizing.
+/// right.  The header is reserved by the panel's own <see cref="Control.Padding"/>,
+/// so a Dock=Fill child lands underneath it and the designer shows the same
+/// arrangement the running app does.
 /// </summary>
-internal sealed class CardPanel : Panel
+public sealed class CardPanel : Panel
 {
     public const int HeadHeight = 30;
-    private const int BottomPad = 1;
 
-    private readonly string _title;
+    private string _title = "Card";
     private string _meta = "";
-    private Control? _content;
+    private bool _autoSizeToContent;
+    private int _gapBelow;
 
-    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public CardPanel()
+    {
+        BackColor = Theme.Panel;
+        ForeColor = Theme.Ink;
+        DoubleBuffered = true;
+        ResizeRedraw = true;
+        Padding = new Padding(1, HeadHeight, 1, 1);
+        Size = new Size(420, HeadHeight + 90);
+    }
+
+    public CardPanel(string title) : this() => _title = title;
+
+    [Category("Card"), DefaultValue("Card")]
+    public string Title
+    {
+        get => _title;
+        set { _title = value ?? ""; InvalidateHeader(); }
+    }
+
+    /// <summary>The dim note printed at the right end of the header strip.</summary>
+    [Category("Card"), DefaultValue("")]
     public string Meta
     {
         get => _meta;
-        set { _meta = value; Invalidate(new Rectangle(0, 0, Width, HeadHeight)); }
+        set { _meta = value ?? ""; InvalidateHeader(); }
     }
 
-    /// <summary>Raised when the card resized itself around new content.</summary>
-    public event EventHandler? HeightChanged;
-
-    public CardPanel(string title)
+    /// <summary>
+    /// Take the card's height from its body instead of keeping the height set in
+    /// the designer.  For cards whose content decides its own height (the readout
+    /// reflows, the timeline is a fixed strip); the body control should be Dock=Top.
+    /// </summary>
+    [Category("Card"), DefaultValue(false)]
+    public bool AutoSizeToContent
     {
-        _title = title;
-        BackColor = Theme.Panel;
-        DoubleBuffered = true;
-        ResizeRedraw = true;
-        Height = HeadHeight + BottomPad;
+        get => _autoSizeToContent;
+        set { _autoSizeToContent = value; FitContent(); }
     }
 
-    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
-    public Control? Content
+    /// <summary>
+    /// Blank space left below the card, inside its own height.  The cards stack by
+    /// Dock=Top, and WinForms ignores Margin on a docked control, so the gap between
+    /// two cards has to belong to one of them - it is drawn in the parent's colour
+    /// and the card's frame stops short of it.
+    /// </summary>
+    [Category("Card"), DefaultValue(0)]
+    public int GapBelow
     {
-        get => _content;
+        get => _gapBelow;
         set
         {
-            if (_content is not null)
-            {
-                _content.SizeChanged -= OnContentSized;
-                Controls.Remove(_content);
-            }
-            _content = value;
-            if (value is null) return;
-            value.Location = new Point(1, HeadHeight);
-            value.SizeChanged += OnContentSized;
-            Controls.Add(value);
-            FitContent();
+            var delta = Math.Max(0, value) - _gapBelow;
+            _gapBelow = Math.Max(0, value);
+            Height += delta;
+            Invalidate();
         }
     }
 
-    private void OnContentSized(object? sender, EventArgs e) => FitContent();
+    /// <summary>The card without its <see cref="GapBelow"/> - what actually gets painted.</summary>
+    private int FrameHeight => Math.Max(1, Height - _gapBelow);
 
+    /// <summary>Size the card so its body gets exactly <paramref name="bodyHeight"/> pixels.</summary>
+    public void SetBodyHeight(int bodyHeight) =>
+        Height = Padding.Top + Math.Max(0, bodyHeight) + Padding.Bottom + _gapBelow;
+
+    /// <summary>Re-take the height from the tallest visible child. No-op unless
+    /// <see cref="AutoSizeToContent"/> is on.</summary>
     public void FitContent()
     {
-        if (_content is null) return;
-        _content.Width = Math.Max(1, Width - 2);
-        var want = HeadHeight + _content.Height + BottomPad;
-        if (Height == want) return;
-        Height = want;
-        Parent?.Invalidate(Bounds, false);
-        HeightChanged?.Invoke(this, EventArgs.Empty);
+        if (!_autoSizeToContent) return;
+        var want = 0;
+        foreach (Control c in Controls)
+            if (c.Visible)
+                want = Math.Max(want, c.Height);
+        if (want > 0) SetBodyHeight(want);
     }
 
-    protected override void OnResize(EventArgs e)
+    private void InvalidateHeader() => Invalidate(new Rectangle(0, 0, Width, HeadHeight));
+
+    protected override void OnControlAdded(ControlEventArgs e)
     {
-        base.OnResize(e);
+        base.OnControlAdded(e);
+        if (e.Control is not null) e.Control.SizeChanged += OnChildSized;
         FitContent();
+    }
+
+    protected override void OnControlRemoved(ControlEventArgs e)
+    {
+        if (e.Control is not null) e.Control.SizeChanged -= OnChildSized;
+        base.OnControlRemoved(e);
+    }
+
+    private void OnChildSized(object? sender, EventArgs e) => FitContent();
+
+    public override Rectangle DisplayRectangle
+    {
+        get
+        {
+            var r = base.DisplayRectangle;
+            return new Rectangle(r.X, r.Y, r.Width, Math.Max(0, r.Height - _gapBelow));
+        }
     }
 
     protected override void OnPaint(PaintEventArgs e)
     {
         var g = e.Graphics;
         g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+        var frame = FrameHeight;
+        if (_gapBelow > 0)
+            using (var b = new SolidBrush(Parent?.BackColor ?? Theme.Bg))
+                g.FillRectangle(b, 0, frame, Width, Height - frame);
         using (var b = new SolidBrush(Theme.Panel2))
             g.FillRectangle(b, 1, 1, Width - 2, HeadHeight - 1);
         using (var p = new Pen(Theme.Line))
         {
-            g.DrawRectangle(p, 0, 0, Width - 1, Height - 1);
+            g.DrawRectangle(p, 0, 0, Width - 1, frame - 1);
             g.DrawLine(p, 1, HeadHeight - 1, Width - 2, HeadHeight - 1);
         }
-        TextRenderer.DrawText(g, _title, Theme.SansBold, new Point(14, 8), Theme.Ink);
+        TextRenderer.DrawText(g, _title, Theme.SansBold, new Point(14, 8), Theme.Ink,
+            TextFormatFlags.NoPrefix);
         if (_meta.Length > 0)
         {
             var size = TextRenderer.MeasureText(g, _meta, Theme.MonoSmall);
             TextRenderer.DrawText(g, _meta, Theme.MonoSmall,
-                new Point(Width - 14 - size.Width, 9), Theme.InkDim);
+                new Point(Width - 14 - size.Width, 9), Theme.InkDim, TextFormatFlags.NoPrefix);
         }
         base.OnPaint(e);
+    }
+}
+
+/// <summary>Which edge a <see cref="RulePanel"/> draws its hairline on.</summary>
+public enum RuleEdge
+{
+    None,
+    Top,
+    Bottom,
+}
+
+/// <summary>A themed panel with an optional hairline along one edge - the separator
+/// under the log strip and above the character editor's footer.</summary>
+public sealed class RulePanel : Panel
+{
+    private RuleEdge _edge = RuleEdge.Top;
+
+    public RulePanel()
+    {
+        BackColor = Theme.Panel;
+        ForeColor = Theme.Ink;
+        ResizeRedraw = true;
+    }
+
+    [Category("Card"), DefaultValue(RuleEdge.Top)]
+    public RuleEdge Edge
+    {
+        get => _edge;
+        set { _edge = value; Invalidate(); }
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        base.OnPaint(e);
+        if (_edge == RuleEdge.None) return;
+        var y = _edge == RuleEdge.Top ? 0 : Height - 1;
+        using var p = new Pen(Theme.Line);
+        e.Graphics.DrawLine(p, 0, y, Width, y);
+    }
+}
+
+/// <summary>A panel that draws the workbench's plain 1px frame around itself.</summary>
+public sealed class FramedPanel : Panel
+{
+    public FramedPanel()
+    {
+        BackColor = Theme.Panel;
+        ForeColor = Theme.Ink;
+        ResizeRedraw = true;
+    }
+
+    /// <summary>
+    /// Size to what the content wants rather than to what it currently measures.
+    /// A Panel's stock AutoSize reads its children's <em>bounds</em>, which for a
+    /// Dock=Fill child are in turn taken from the panel - the two starve each other
+    /// down to nothing.  Asking the child for its own preferred size breaks that,
+    /// and lets a card wrap an auto-sizing table without any pixel arithmetic.
+    /// </summary>
+    private static readonly Size Unconstrained = new(int.MaxValue, int.MaxValue);
+
+    public override Size GetPreferredSize(Size proposedSize)
+    {
+        if (!AutoSize) return base.GetPreferredSize(proposedSize);
+        int w = 0, h = 0;
+        foreach (Control c in Controls)
+        {
+            if (!c.Visible) continue;
+            var want = c.GetPreferredSize(Unconstrained);
+            w = Math.Max(w, want.Width + c.Margin.Horizontal);
+            h = Math.Max(h, want.Height + c.Margin.Vertical);
+        }
+        return w == 0 && h == 0
+            ? base.GetPreferredSize(proposedSize)
+            : new Size(w + Padding.Horizontal, h + Padding.Vertical);
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        base.OnPaint(e);
+        Theme.DrawFrame(e.Graphics, ClientRectangle);
+    }
+}
+
+/// <summary>The "drop a recording here" target: a label in a dashed frame.</summary>
+public sealed class DropHintLabel : Label
+{
+    private int _gapBelow;
+
+    public DropHintLabel()
+    {
+        BackColor = Theme.Bg;
+        ForeColor = Theme.InkDim;
+        Font = Theme.Mono;
+        TextAlign = ContentAlignment.MiddleCenter;
+        Cursor = Cursors.Hand;
+        AutoSize = false;
+        Height = 92;
+    }
+
+    /// <summary>Blank space below the dashed frame, inside the control's own height -
+    /// same trick as <see cref="CardPanel.GapBelow"/>, for the same reason.</summary>
+    [Category("Card"), DefaultValue(0)]
+    public int GapBelow
+    {
+        get => _gapBelow;
+        set
+        {
+            var delta = Math.Max(0, value) - _gapBelow;
+            _gapBelow = Math.Max(0, value);
+            Height += delta;
+            // keeps the caption centred on the framed part, not on the gap
+            Padding = new Padding(Padding.Left, Padding.Top, Padding.Right, _gapBelow);
+            Invalidate();
+        }
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        base.OnPaint(e);
+        using var p = new Pen(Theme.Line) { DashStyle = DashStyle.Dash };
+        e.Graphics.DrawRectangle(p, 0, 0, Width - 1, Math.Max(1, Height - _gapBelow) - 1);
+    }
+}
+
+/// <summary>The app menu bar, dark-rendered. A control rather than four lines of
+/// setup in every form, so the designer shows it themed.</summary>
+public sealed class DarkMenuStrip : MenuStrip
+{
+    public DarkMenuStrip()
+    {
+        BackColor = Theme.Panel2;
+        ForeColor = Theme.Ink;
+        Renderer = new ToolStripProfessionalRenderer(new DarkColors());
+        Padding = new Padding(6, 2, 0, 2);
+    }
+
+    protected override void OnItemAdded(ToolStripItemEventArgs e)
+    {
+        base.OnItemAdded(e);
+        if (e.Item is ToolStripMenuItem m) Recolour(m);
+    }
+
+    /// <summary>Re-apply the palette to every item, including drop-downs built after
+    /// the strip was created (the designer adds children item by item).</summary>
+    public void Recolour()
+    {
+        foreach (var item in Items)
+            if (item is ToolStripMenuItem m)
+                Recolour(m);
+    }
+
+    private static void Recolour(ToolStripMenuItem item)
+    {
+        item.BackColor = Theme.Panel2;
+        item.ForeColor = Theme.Ink;
+        foreach (var child in item.DropDownItems)
+            if (child is ToolStripMenuItem m) Recolour(m);
+    }
+
+    private sealed class DarkColors : ProfessionalColorTable
+    {
+        public override Color MenuItemSelected => Theme.Line;
+        public override Color MenuItemSelectedGradientBegin => Theme.Line;
+        public override Color MenuItemSelectedGradientEnd => Theme.Line;
+        public override Color MenuItemBorder => Theme.PhosphorDeep;
+        public override Color MenuBorder => Theme.Line;
+        public override Color ToolStripDropDownBackground => Theme.Panel2;
+        public override Color ImageMarginGradientBegin => Theme.Panel2;
+        public override Color ImageMarginGradientMiddle => Theme.Panel2;
+        public override Color ImageMarginGradientEnd => Theme.Panel2;
+        public override Color MenuStripGradientBegin => Theme.Panel2;
+        public override Color MenuStripGradientEnd => Theme.Panel2;
+        public override Color SeparatorDark => Theme.Line;
+        public override Color SeparatorLight => Theme.Line;
+    }
+}
+
+/// <summary>A dark, flat, monospaced text box - the dialogs' input style.</summary>
+public sealed class DarkTextBox : TextBox
+{
+    public DarkTextBox()
+    {
+        BackColor = Theme.Panel2;
+        ForeColor = Theme.Ink;
+        Font = Theme.Mono;
+        BorderStyle = BorderStyle.FixedSingle;
+    }
+}
+
+/// <summary>A dark, flat, monospaced drop-down - the forms' picker style.</summary>
+public sealed class DarkComboBox : ComboBox
+{
+    public DarkComboBox()
+    {
+        DropDownStyle = ComboBoxStyle.DropDownList;
+        BackColor = Theme.Panel2;
+        ForeColor = Theme.Ink;
+        FlatStyle = FlatStyle.Flat;
+        Font = Theme.Mono;
+    }
+}
+
+/// <summary>A dark, right-aligned numeric spinner - every id field in the app.</summary>
+public sealed class DarkNumeric : NumericUpDown
+{
+    public DarkNumeric()
+    {
+        Minimum = 0;
+        Maximum = 255;
+        Font = Theme.Mono;
+        BackColor = Theme.Panel2;
+        ForeColor = Theme.Ink;
+        BorderStyle = BorderStyle.FixedSingle;
+        TextAlign = HorizontalAlignment.Right;
+    }
+}
+
+/// <summary>A dim monospaced caption - the small explanatory lines under a card.</summary>
+public sealed class HintLabel : Label
+{
+    public HintLabel()
+    {
+        Font = Theme.MonoSmall;
+        ForeColor = Theme.InkDim;
+        BackColor = Theme.Panel;
+        AutoSize = false;
+        UseMnemonic = false;
     }
 }
 
@@ -102,7 +386,7 @@ internal sealed class CardPanel : Panel
 /// The recording header: a responsive grid of label-over-value cells, painted
 /// rather than laid out so it reflows with the window without flicker.
 /// </summary>
-internal sealed class ReadoutView : Control
+public sealed class ReadoutView : Control
 {
     private IReadOnlyList<(string Key, string Value, ReadoutTone Tone)> _cells = [];
 
@@ -111,12 +395,13 @@ internal sealed class ReadoutView : Control
         DoubleBuffered = true;
         ResizeRedraw = true;
         BackColor = Theme.Panel;
+        Height = DesignHeight;
     }
 
     public void SetCells(IReadOnlyList<(string, string, ReadoutTone)> cells)
     {
         _cells = cells;
-        Layout();
+        Reflow();
         Invalidate();
     }
 
@@ -128,11 +413,20 @@ internal sealed class ReadoutView : Control
     private int ValueH => Theme.Mono.Height;
     private int CellH => KeyH + ValueH + 14;
 
+    /// <summary>Two rows' worth, so the card is not a sliver on the design surface.</summary>
+    private int DesignHeight => Pad * 2 + CellH * 2;
+
     private int Columns => Math.Max(1, (Width - Pad * 2 + Gap) / (MinCellW + Gap));
 
-    private new void Layout()
+    private void Reflow()
     {
-        if (_cells.Count == 0) { Height = 0; return; }
+        if (_cells.Count == 0)
+        {
+            // Empty at design time means "no file loaded", which at runtime is a
+            // hidden card - but on the design surface it has to be visible.
+            Height = DesignMode ? DesignHeight : 0;
+            return;
+        }
         var rows = (int)Math.Ceiling(_cells.Count / (double)Columns);
         Height = Pad * 2 + rows * CellH;
     }
@@ -140,7 +434,7 @@ internal sealed class ReadoutView : Control
     protected override void OnResize(EventArgs e)
     {
         base.OnResize(e);
-        Layout();
+        Reflow();
         Invalidate();
     }
 
@@ -148,6 +442,12 @@ internal sealed class ReadoutView : Control
     {
         var g = e.Graphics;
         g.Clear(Theme.Panel);
+        if (_cells.Count == 0 && DesignMode)
+        {
+            TextRenderer.DrawText(g, "(recording header)", Theme.MonoSmall,
+                new Point(Pad, Pad), Theme.InkFaint);
+            return;
+        }
         var cols = Columns;
         var colW = (Width - Pad * 2 - (cols - 1) * Gap) / Math.Max(1, cols);
         for (var i = 0; i < _cells.Count; i++)
@@ -168,7 +468,7 @@ internal sealed class ReadoutView : Control
 /// the way you'd scrub an oscilloscope capture, with waymark placements flagged
 /// above it and clock ticks below.
 /// </summary>
-internal sealed class TimelineControl : Control
+public sealed class TimelineControl : Control
 {
     public sealed record Band(int Index, int Number, uint StartMs, uint EndMs);
 
@@ -207,7 +507,7 @@ internal sealed class TimelineControl : Control
 
     public void Clear() => SetData([], [], 1);
 
-    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    [Browsable(false), DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public int Selected
     {
         get => _selected;
@@ -313,7 +613,7 @@ internal sealed class TimelineControl : Control
 }
 
 /// <summary>A dark-drawn details ListView - WinForms won't theme its own header.</summary>
-internal sealed class DarkListView : ListView
+public sealed class DarkListView : ListView
 {
     public DarkListView()
     {
@@ -367,27 +667,77 @@ internal sealed class DarkListView : ListView
 }
 
 /// <summary>Flat dark button; <see cref="Accent"/> makes it the primary action.</summary>
-internal sealed class FlatButton : Button
+public sealed class FlatButton : Button
 {
-    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
-    public bool Accent { get; init; }
+    private bool _accent;
+    private bool _autoFit = true;
 
-    public FlatButton(string text)
+    public FlatButton()
     {
-        Text = text;
         FlatStyle = FlatStyle.Flat;
         Font = Theme.Sans;
         AutoSize = false;
         Margin = new Padding(0, 0, 12, 0);
         UseVisualStyleBackColor = false;
         Cursor = Cursors.Hand;
+        Size = new Size(110, 30);
+        Repaint();
+    }
+
+    public FlatButton(string text) : this()
+    {
+        Text = text;
         FitText();
+    }
+
+    /// <summary>Primary-action styling: phosphor text on a deep teal face.</summary>
+    [Category("Appearance"), DefaultValue(false)]
+    public bool Accent
+    {
+        get => _accent;
+        set { _accent = value; Repaint(); }
+    }
+
+    /// <summary>
+    /// Shrink-wrap the button around its caption.  Turn this off (the designer files
+    /// do) when the size set in the designer is the size that should stick - otherwise
+    /// the button re-measures itself on every text or font change and the designer's
+    /// number is thrown away.
+    /// </summary>
+    [Category("Layout"), DefaultValue(true)]
+    public bool AutoFit
+    {
+        get => _autoFit;
+        set { _autoFit = value; FitText(); }
     }
 
     private void FitText()
     {
+        if (!_autoFit) return;
+        Size = FittedSize();
+    }
+
+    private Size FittedSize()
+    {
         var s = TextRenderer.MeasureText(Text, Font);
-        Size = new Size(s.Width + 32, s.Height + 16);
+        return new Size(s.Width + 32, s.Height + 16);
+    }
+
+    /// <summary>
+    /// Answer with the shrink-wrapped size while <see cref="AutoFit"/> is on, so a
+    /// flow or table panel measuring this button gets the size it is going to end
+    /// up at rather than whatever it happens to be before the handle exists.
+    /// </summary>
+    public override Size GetPreferredSize(Size proposedSize) =>
+        _autoFit ? FittedSize() : base.GetPreferredSize(proposedSize);
+
+    private void Repaint()
+    {
+        FlatAppearance.BorderColor = _accent ? Theme.PhosphorDeep : Theme.Line;
+        FlatAppearance.MouseOverBackColor = _accent ? Theme.PhosphorDeep : Theme.Panel2;
+        FlatAppearance.MouseDownBackColor = Theme.Panel2;
+        BackColor = _accent ? Color.FromArgb(24, 52, 56) : Theme.Panel;
+        ForeColor = Enabled ? (_accent ? Theme.Phosphor : Theme.Ink) : Theme.InkFaint;
     }
 
     protected override void OnTextChanged(EventArgs e)
@@ -406,46 +756,26 @@ internal sealed class FlatButton : Button
     {
         base.OnHandleCreated(e);
         FitText();
-        FlatAppearance.BorderColor = Accent ? Theme.PhosphorDeep : Theme.Line;
-        FlatAppearance.MouseOverBackColor = Accent ? Theme.PhosphorDeep : Theme.Panel2;
-        FlatAppearance.MouseDownBackColor = Theme.Panel2;
-        BackColor = Accent ? Color.FromArgb(24, 52, 56) : Theme.Panel;
-        ForeColor = Accent ? Theme.Phosphor : Theme.Ink;
+        Repaint();
     }
 
     protected override void OnEnabledChanged(EventArgs e)
     {
         base.OnEnabledChanged(e);
-        ForeColor = Enabled ? (Accent ? Theme.Phosphor : Theme.Ink) : Theme.InkFaint;
+        Repaint();
     }
 }
 
 /// <summary>Checkbox with a bold caption and a dim explanatory line beneath it.</summary>
-internal sealed class OptionCheck : Panel
+public sealed class OptionCheck : Panel
 {
-    public CheckBox Box { get; }
     private readonly Label _sub;
 
-    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
-    public string SubText
-    {
-        get => _sub.Text;
-        set => _sub.Text = value;
-    }
-
-    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
-    public bool Checked
-    {
-        get => Box.Checked;
-        set => Box.Checked = value;
-    }
-
-    public OptionCheck(string caption, string sub)
+    public OptionCheck()
     {
         BackColor = Theme.Panel;
         Box = new CheckBox
         {
-            Text = caption,
             Font = Theme.Sans,
             ForeColor = Theme.Ink,
             BackColor = Theme.Panel,
@@ -458,7 +788,6 @@ internal sealed class OptionCheck : Panel
         Box.FlatAppearance.BorderColor = Theme.Line;
         _sub = new Label
         {
-            Text = sub,
             Font = Theme.MonoSmall,
             ForeColor = Theme.InkDim,
             AutoSize = false,
@@ -470,14 +799,51 @@ internal sealed class OptionCheck : Panel
         Controls.Add(_sub);
         Box.SizeChanged += (_, _) => Arrange();
         Resize += (_, _) => Arrange();
+        Width = 300;
         Arrange();
+    }
+
+    public OptionCheck(string caption, string sub) : this()
+    {
+        Caption = caption;
+        SubText = sub;
+    }
+
+    /// <summary>The checkbox itself, for wiring CheckedChanged.</summary>
+    [Browsable(false), DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public CheckBox Box { get; }
+
+    [Category("Appearance"), DefaultValue("")]
+    public string Caption
+    {
+        get => Box.Text;
+        set => Box.Text = value ?? "";
+    }
+
+    [Category("Appearance"), DefaultValue("")]
+    [Editor("System.ComponentModel.Design.MultilineStringEditor, System.Design",
+        "System.Drawing.Design.UITypeEditor, System.Drawing")]
+    public string SubText
+    {
+        get => _sub.Text;
+        set { _sub.Text = value ?? ""; Arrange(); }
+    }
+
+    [Category("Behavior"), DefaultValue(false)]
+    public bool Checked
+    {
+        get => Box.Checked;
+        set => Box.Checked = value;
     }
 
     private void Arrange()
     {
         var indent = Box.Height;
-        _sub.SetBounds(indent, Box.Height + 1, Math.Max(40, Width - indent), _sub.Height);
-        var want = Box.Height + _sub.Height + 5;
+        // One line, measured from the font: reading the label's own height back out
+        // lets any stretch of it feed into the option's height and stick there.
+        var subH = _sub.Font.Height + 2;
+        _sub.SetBounds(indent, Box.Height + 1, Math.Max(40, Width - indent), subH);
+        var want = Box.Height + subH + 5;
         if (Height != want) Height = want;
     }
 
@@ -496,13 +862,13 @@ internal sealed class OptionCheck : Panel
 /// player's name. Drawn rather than glyphed so it doesn't depend on a font having
 /// the symbol, and so it can tint to show pending edits.
 /// </summary>
-internal sealed class CogButton : Control
+public sealed class CogButton : Control
 {
     private bool _hover;
     private bool _edited;
 
     /// <summary>Tint the cog when this character has unsaved appearance edits.</summary>
-    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    [Category("Appearance"), DefaultValue(false)]
     public bool Edited
     {
         get => _edited;
@@ -516,6 +882,7 @@ internal sealed class CogButton : Control
         BackColor = Theme.Panel;
         Cursor = Cursors.Hand;
         TabStop = false;
+        Size = new Size(20, 20);
     }
 
     protected override void OnMouseEnter(EventArgs e)
