@@ -16,6 +16,9 @@ namespace ReplayWorkbench.Core;
 /// + status icon (set to <see cref="OnlineStatusData.InDuty"/>)</item>
 /// <item>ActorControl category 504 - the status icon again, re-sent after the
 /// spawn; left alone it puts the original icon back seconds into the playback</item>
+/// <item>ModelEquip (72B) - a gear change made during the recording; it carries
+/// the same armor models and weapons as the spawn, so left alone it walks the
+/// original outfit back on screen the moment it plays</item>
 /// <item>PartyList (3672B = 8x456 + trailer; matched by length) - the party panel's
 /// roster, which keeps its own copy of each member's home world</item>
 /// <item>party-member appearance (1408B = 8x176, gear stored as item IDs;
@@ -74,6 +77,7 @@ public static class Anonymizer
         var span = bytes.AsSpan();
         var replayLen = BinaryPrimitives.ReadInt32LittleEndian(span[ReplayFormat.OffReplayLen..]);
         var spawnOp = PatchChain.Lookup(filePatch, "PlayerSpawn");
+        var equipOp = PatchChain.Lookup(filePatch, "ModelEquip");
         // The status icon is re-sent after the spawn; see the note in pass 3.
         var iconOps = CharacterLayout.ActorControlOpNames
             .Select(n => PatchChain.Lookup(filePatch, n))
@@ -88,6 +92,9 @@ public static class Anonymizer
         // "Player 4"s and a roster three people short.
         var roster = new List<(ulong Key, string Name)>();
         var oids = new HashSet<uint>();
+        // Actor id to job, so a ModelEquip can be redressed in the artifact set of
+        // the job its owner's spawn packet gave them - see the branch in pass 3.
+        var jobByOid = new Dictionary<uint, byte>();
         var keys = new List<ulong>();   // per-character keys, first-seen order
         var off = 0;
         while (off < replayLen)
@@ -101,7 +108,7 @@ public static class Anonymizer
             {
                 var nm = ReadName(bytes, p + lay.Name);
                 var oid = BinaryPrimitives.ReadUInt32LittleEndian(span[(b + 8)..]);
-                if (oid != 0) oids.Add(oid);
+                if (oid != 0) { oids.Add(oid); jobByOid[oid] = bytes[p + lay.Job]; }
                 var key = BinaryPrimitives.ReadUInt64LittleEndian(span[(p + lay.CharacterKey)..]);
                 if (key != 0)
                 {
@@ -172,7 +179,7 @@ public static class Anonymizer
         // Pass 3: race (+ gear) on spawn and appearance packets, and the name field.
         // The per-character name is written here, after the sweep, so it is the last
         // word on who each spawn packet belongs to.
-        int spawns = 0, dressed = 0, rosters = 0, icons = 0;
+        int spawns = 0, dressed = 0, rosters = 0, icons = 0, equips = 0;
         off = 0;
         while (off < replayLen)
         {
@@ -185,26 +192,11 @@ public static class Anonymizer
             if (lay is not null)
             {
                 WriteCustomize(bytes, p + lay.Customize, race);
+                // dress the in-arena model; a job with no artifact set is stripped instead
                 var g = OpcodeData.GearForJob(bytes[p + lay.Job]);
-                if (g is not null)
-                {
-                    // dress the in-arena model: [model:u16][variant:u8][stain:u8] per slot
-                    for (var s = 0; s < g.GearModels.Length && s * 4 < PsGearN; s++)
-                    {
-                        var at = p + lay.Gear + s * 4;
-                        BinaryPrimitives.WriteUInt16LittleEndian(span[at..], (ushort)g.GearModels[s][0]);
-                        bytes[at + 2] = (byte)g.GearModels[s][1];
-                        bytes[at + 3] = 0;
-                    }
-                    WriteWeapon(span, p + lay.Weapon, g.WeaponModel);   // mainhand -> AF weapon
-                    WriteWeapon(span, p + lay.WeaponSub, g.WeaponSub);  // offhand  -> AF secondary (or cleared)
-                }
-                else
-                {
-                    Array.Clear(bytes, p + lay.Gear, PsGearN);
-                    WriteWeapon(span, p + lay.Weapon, null);
-                    WriteWeapon(span, p + lay.WeaponSub, null);
-                }
+                WriteGearModels(bytes, p + lay.Gear, g);
+                WriteWeapon(span, p + lay.Weapon, g?.WeaponModel);   // mainhand -> AF weapon
+                WriteWeapon(span, p + lay.WeaponSub, g?.WeaponSub);  // offhand  -> AF secondary (or cleared)
                 BinaryPrimitives.WriteUInt16LittleEndian(span[(p + lay.Facewear)..], 0); // facewear leaks identity
                 // A title is a Title-sheet row, the same value for everyone wearing
                 // it, so it does not name anyone on its own - but a rare one narrows
@@ -269,6 +261,31 @@ public static class Anonymizer
                     rosters++;
                 }
             }
+            else if (op == equipOp && len == CharacterLayout.ModelEquipLength)
+            {
+                // A gear change made mid-recording. It stores armor and weapons the
+                // way the spawn packet does, and it is the last word on both from the
+                // moment it plays, so redressing the spawn alone buys a few seconds of
+                // anonymity and then hands the original glamour - and the original
+                // weapons - straight back.
+                //
+                // Whose gear it is comes from the segment header's actor id, the same
+                // join the status icons use, so the character is put back into the
+                // artifact set of the job their own spawn gave them and the two packets
+                // agree slot for slot. An actor with no spawn in this file falls back to
+                // the packet's own job byte, and to bare models if that names no job -
+                // conspicuous, but not identifying, which is the way round to fail here.
+                var oid = BinaryPrimitives.ReadUInt32LittleEndian(span[(b + 8)..]);
+                var job = jobByOid.TryGetValue(oid, out var known)
+                    ? known
+                    : bytes[p + CharacterLayout.ModelEquipJob];
+                var g = OpcodeData.GearForJob(job);
+                WriteGearModels(bytes, p + CharacterLayout.ModelEquipGear, g);
+                WriteWeapon(span, p + CharacterLayout.ModelEquipWeapon, g?.WeaponModel);
+                WriteWeapon(span, p + CharacterLayout.ModelEquipWeaponSub, g?.WeaponSub);
+                Array.Clear(bytes, p + CharacterLayout.ModelEquipDye2, PsDye2N);
+                equips++;
+            }
             else if (Array.IndexOf(iconOps, op) >= 0 && len >= CharacterLayout.ActorControlMinLength &&
                      BinaryPrimitives.ReadUInt16LittleEndian(span[(p + CharacterLayout.ActorControlCategory)..]) ==
                      CharacterLayout.ActorControlSetStatusIcon)
@@ -314,6 +331,7 @@ public static class Anonymizer
 
         var note = $" · anonymized {roster.Count} players ({spawns} spawns, {dressed} dressed, " +
                    $"{rosters} roster entries, {icons} status icons, " +
+                   $"{equips} gear changes, " +
                    $"{roster.Count} names→{nameHits} refs, {idMap.Count} ids→{idHits} refs";
         note += keyMap.Count > 0 ? $", {keyMap.Count} keys→{keyHits} refs)" : ")";
         return new AnonymizeResult { Note = note, KeyRemap = keyMap };
@@ -371,6 +389,29 @@ public static class Anonymizer
         var lab = Encoding.UTF8.GetBytes(label);
         Array.Clear(bytes, at, PsNameN);
         lab.AsSpan(0, Math.Min(lab.Length, PsNameN - 1)).CopyTo(bytes.AsSpan(at));
+    }
+
+    /// <summary>
+    /// Dress a <see cref="CharacterLayout.GearSlots"/>-slot armor array -
+    /// [model u16][variant u8][dye u8] per slot - in <paramref name="g"/>'s artifact
+    /// models, or clear it outright when the job has no set.
+    ///
+    /// <para>Shared by PlayerSpawn and ModelEquip, which store armor identically.
+    /// The two have to agree: ModelEquip is the last word on how a character looks
+    /// from the moment it plays, so any slot they disagree about is a slot that
+    /// changes on screen partway through the playback.</para>
+    /// </summary>
+    private static void WriteGearModels(byte[] bytes, int at, JobGear? g)
+    {
+        if (g is null) { Array.Clear(bytes, at, PsGearN); return; }
+        var span = bytes.AsSpan();
+        for (var s = 0; s < g.GearModels.Length && s * 4 < PsGearN; s++)
+        {
+            var o = at + s * 4;
+            BinaryPrimitives.WriteUInt16LittleEndian(span[o..], (ushort)g.GearModels[s][0]);
+            bytes[o + 2] = (byte)g.GearModels[s][1];
+            bytes[o + 3] = 0;
+        }
     }
 
     private static void WriteCustomize(byte[] bytes, int at, int race)

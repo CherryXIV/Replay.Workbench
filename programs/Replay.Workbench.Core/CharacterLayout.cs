@@ -300,6 +300,47 @@ public static class CharacterLayout
     public static readonly string[] ActorControlOpNames =
         { "ActorControl", "ActorControlSelf", "ActorControlTarget" };
 
+    // ---- ModelEquip: a gear change made during the recording ------------------
+    //
+    // A player who changes gear mid-recording sends this, and it carries the same
+    // armor models and the same two weapons the spawn packet does. Left alone it is
+    // the last word on how that character looks from the moment it plays, so an
+    // anonymized recording puts the original outfit - and the original weapons -
+    // back on screen the instant the first one arrives.
+    //
+    // Read off a recording made for the purpose: one player swapping one slot at a
+    // time, six changes, six 72-byte packets. Every field below is pinned against
+    // that player's own PlayerSpawn, which this packet reproduces byte for byte -
+    // the first ModelEquip differs from the spawn in exactly the one slot that was
+    // swapped, and each later one in one slot more, which is what identifies the
+    // array as armor rather than something that merely looks like it.
+    //
+    // That accounts for 0x00-0x45 of the 72. The four bytes at +0x10 read
+    // [0][job][level][0] - 38 and 100 for a level-100 Dancer, matching the job and
+    // level bytes of the same character's spawn. Only the one character has been
+    // measured, so the job byte is a fallback and not the primary join: whose gear
+    // this is comes from the segment header's object id, the same actor id that
+    // character's PlayerSpawn carries - the join the status icons already use.
+
+    public const int ModelEquipLength = 72;
+
+    /// <summary>Mainhand, packed exactly as <see cref="SpawnLayout.Weapon"/>.</summary>
+    public const int ModelEquipWeapon = 0x00;
+
+    /// <summary>Offhand, packed exactly as <see cref="SpawnLayout.WeaponSub"/>.</summary>
+    public const int ModelEquipWeaponSub = 0x08;
+
+    /// <summary>Job id (u8). Inferred from a single character - see the note above -
+    /// so it is only read when the segment header's actor id matches no PlayerSpawn.</summary>
+    public const int ModelEquipJob = 0x11;
+
+    /// <summary><see cref="GearSlots"/> slots of [model u16][variant u8][dye u8], the
+    /// same form and order as <see cref="SpawnLayout.Gear"/>.</summary>
+    public const int ModelEquipGear = 0x14;
+
+    /// <summary>Per-slot second dye channel, as <see cref="SpawnLayout.Dye2"/>.</summary>
+    public const int ModelEquipDye2 = 0x3C;
+
     /// <summary>Armor slot order, shared by both packets.</summary>
     public static readonly string[] GearSlotNames =
     {

@@ -39,7 +39,7 @@ if (latest is { Count: > 0 })
     foreach (var name in ReplayFormat.CombatOpNames.Concat(new[]
              {
                  "NpcSpawn", "PlayerSpawn", "PlaceFieldMarker", "PlaceFieldMarkerPreset",
-                 "PartyList", "PartyPortraitInfo", "FirstAttack",
+                 "PartyList", "PartyPortraitInfo", "FirstAttack", "ModelEquip",
              }))
         Check(latest.ContainsKey(name), $"the table still has {name}");
 }

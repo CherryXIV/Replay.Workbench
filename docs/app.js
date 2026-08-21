@@ -1098,6 +1098,9 @@ function stripPartyPortraitsIfChecked(bytes){
        The spawn byte is not the last word on it: these land seconds in and the
        client acts on them from then on, so stripping only the spawn leaves the
        icon correct until the first of these plays and puts the original back.
+     ModelEquip (72B)            — a gear change made during the recording. It stores
+       armor and both weapons the way the spawn packet does, so redressing the spawn
+       alone buys a few seconds of anonymity and then hands the original glamour back.
      plus every name string, replaced length-preserving across the file.
    AF gear comes from JOB_AF_GEAR (afgear.js): item IDs for the appearance packet,
    [model,variant] armor + [model,base,variant] weapon for the spawn packet.
@@ -1195,6 +1198,30 @@ const ANON_ONLINE_STATUS=43;
 // three are rewritten rather than betting the icon on which one a future recording uses.
 const AC_STATUS_ICON=504, AC_CATEGORY=0, AC_PARAM1=4, AC_MIN_LEN=8;
 const AC_OP_NAMES=["ActorControl","ActorControlSelf","ActorControlTarget"];
+// ModelEquip: what a player sends when they change gear mid-recording, and the last
+// word on how they look from the moment it plays. Read off a recording made for the
+// purpose — one player swapping one slot at a time, six changes, six 72-byte packets —
+// and every field is pinned against that player's own PlayerSpawn, which this packet
+// reproduces byte for byte: the two weapon u64s at +0x00 and +0x08 are identical to
+// the spawn's in all six, the 10-slot armor array at +0x14 is in the spawn's own
+// [model u16][variant u8][dye u8] form (the first packet differs from the spawn in
+// exactly the one slot that was swapped, each later one in one slot more), and the
+// second dye channel at +0x3C is the spawn's ten bytes again.
+// The four bytes at +0x10 read [0][job][level][0] — 38 and 100 for a level-100 Dancer,
+// matching that character's spawn. Only the one character has been measured, so the
+// job byte is a fallback and not the primary join: whose gear this is comes from the
+// segment header's object id, the same actor id the character's PlayerSpawn carries.
+const ME_LEN=72, ME_WEAPON=0x00, ME_WEAPON_SUB=0x08, ME_JOB=0x11, ME_GEAR=0x14, ME_DYE2=0x3C;
+
+// Dress a 10-slot armor array — [model u16][variant u8][dye u8] per slot — in the
+// job's artifact models, or clear it outright when the job has no set. Shared by
+// PlayerSpawn and ModelEquip, which store armor identically; the two have to agree,
+// since any slot they disagree about is a slot that changes on screen partway
+// through the playback.
+function writeGearModels(bytes,dv,at,g){
+  if(!g){ bytes.fill(0,at,at+PS_GEAR_N); return; }
+  g.gearModels.forEach(([m,v],s)=>{ dv.setUint16(at+s*4,m,true); bytes[at+s*4+2]=v; bytes[at+s*4+3]=0; });
+}
 
 // A valid generic customize for (race, gender): default features, mid tones.
 function customizeFor(race,gender){
@@ -1233,6 +1260,7 @@ function applyAnonymizeIfChecked(bytes){
   const replayLen=dv.getInt32(OFF_REPLAY_LEN,true);
   const spawnTable=patchTable(filePatch);
   const spawnOp=spawnTable ? spawnTable.PlayerSpawn : null;
+  const equipOp=spawnTable ? spawnTable.ModelEquip : null;
   const iconOps=new Set(spawnTable ? AC_OP_NAMES.map(n=>spawnTable[n]).filter(o=>o!=null) : []);
   const td=new TextDecoder();
 
@@ -1240,6 +1268,9 @@ function applyAnonymizeIfChecked(bytes){
   // segment-header oid (b+8) is the spawning player's own actor/object ID.
   const labels=new Map(); // name string -> "Player N"
   const oids=new Set();   // real player object IDs to scramble
+  // Actor id -> job, so a ModelEquip can be redressed in the artifact set of the job
+  // its owner's spawn packet gave them — see the ModelEquip branch in pass 2.
+  const jobByOid=new Map();
   let off=0;
   while(off<replayLen){
     const b=DATA_START+off, op=dv.getUint16(b,true), len=dv.getUint16(b+2,true), p=b+SEG_HEADER;
@@ -1249,7 +1280,7 @@ function applyAnonymizeIfChecked(bytes){
       const nm=td.decode(bytes.subarray(p+L.name,end));
       if(nm && !labels.has(nm)) labels.set(nm,`Player ${labels.size+1}`);
       const oid=dv.getUint32(b+8,true);
-      if(oid) oids.add(oid);
+      if(oid){ oids.add(oid); jobByOid.set(oid,bytes[p+L.job]); }
     }
     off+=SEG_HEADER+len;
   }
@@ -1266,19 +1297,18 @@ function applyAnonymizeIfChecked(bytes){
   }
 
   // Pass 2: race (+ gear) on spawn and appearance packets.
-  let spawns=0, appears=0, dressed=0, rosters=0, icons=0;
+  let spawns=0, appears=0, dressed=0, rosters=0, icons=0, equips=0;
   off=0;
   while(off<replayLen){
     const b=DATA_START+off, op=dv.getUint16(b,true), len=dv.getUint16(b+2,true), p=b+SEG_HEADER;
     const L=(spawnOp!=null && op===spawnOp) ? spawnLayoutFor(len) : null;
     if(L){
       writeCustomize(bytes,p+L.cust,race);
+      // dress the in-arena model; a job with no artifact set is stripped instead
       const g=JOB_AF_GEAR[bytes[p+L.job]];
-      if(g){ // dress the in-arena model: [model:u16][variant:u8][stain:u8] per slot
-        g.gearModels.forEach(([m,v],s)=>{ dv.setUint16(p+L.gear+s*4,m,true); bytes[p+L.gear+s*4+2]=v; bytes[p+L.gear+s*4+3]=0; });
-        writeWeapon(dv,p+L.weapon,g.weaponModel);   // mainhand -> AF weapon
-        writeWeapon(dv,p+L.weaponSub,g.weaponSub);  // offhand  -> AF secondary (or cleared)
-      } else { bytes.fill(0,p+L.gear,p+L.gear+PS_GEAR_N); writeWeapon(dv,p+L.weapon); writeWeapon(dv,p+L.weaponSub); }
+      writeGearModels(bytes,dv,p+L.gear,g);
+      writeWeapon(dv,p+L.weapon,g&&g.weaponModel);       // mainhand -> AF weapon
+      writeWeapon(dv,p+L.weaponSub,g&&g.weaponSub);      // offhand  -> AF secondary (or cleared)
       dv.setUint16(p+L.face,0,true); // strip facewear/glasses — it leaks identity
       dv.setUint16(p+L.title,0,true); // a rare title narrows the field hard
       bytes[p+L.onlineStatus]=ANON_ONLINE_STATUS; // status icon -> In Duty
@@ -1311,6 +1341,21 @@ function applyAnonymizeIfChecked(bytes){
         dv.setUint16(e+PL_HOME,ANON_WORLD,true);
         rosters++;
       }
+    } else if(equipOp!=null && op===equipOp && len===ME_LEN){
+      // A gear change made mid-recording — see ME_LEN. Whose it is comes from the
+      // segment header's actor id, so the character goes back into the artifact set
+      // of the job their own spawn gave them and the two packets agree slot for slot.
+      // An actor with no spawn in this file falls back to the packet's own job byte,
+      // and to bare models if that names no job — conspicuous, but not identifying,
+      // which is the way round to fail here.
+      const oid=dv.getUint32(b+8,true);
+      const job=jobByOid.has(oid) ? jobByOid.get(oid) : bytes[p+ME_JOB];
+      const g=JOB_AF_GEAR[job];
+      writeGearModels(bytes,dv,p+ME_GEAR,g);
+      writeWeapon(dv,p+ME_WEAPON,g&&g.weaponModel);
+      writeWeapon(dv,p+ME_WEAPON_SUB,g&&g.weaponSub);
+      bytes.fill(0,p+ME_DYE2,p+ME_DYE2+PS_DYE2_N);
+      equips++;
     } else if(iconOps.has(op) && len>=AC_MIN_LEN && dv.getUint16(p+AC_CATEGORY,true)===AC_STATUS_ICON){
       // The spawn byte above is not the last word on the icon — see AC_STATUS_ICON.
       dv.setUint32(p+AC_PARAM1,ANON_ONLINE_STATUS,true);
@@ -1338,7 +1383,7 @@ function applyAnonymizeIfChecked(bytes){
     idHits+=replaceBytes(bytes,need,rep);
   }
 
-  return ` · anonymized ${labels.size} players (${spawns} spawns, ${dressed} dressed, ${rosters} roster entries, ${icons} status icons, ${idMap.size} ids→${idHits} refs)`;
+  return ` · anonymized ${labels.size} players (${spawns} spawns, ${dressed} dressed, ${rosters} roster entries, ${icons} status icons, ${equips} gear changes, ${idMap.size} ids→${idHits} refs)`;
 }
 
 // Enable the race dropdown only while "Anonymize players" is checked.
