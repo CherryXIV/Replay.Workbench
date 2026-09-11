@@ -22,7 +22,7 @@ ROW_JOBS = {
     "CNJ/WHM": [6, 24], "SCH": [28], "AST": [33], "SGE": [40],
     "PGL/MNK": [2, 20], "LNC/DRG": [4, 22], "ROG/NIN": [29, 30], "SAM": [34],
     "RPR": [39], "VPR": [41], "ARC/BRD": [5, 23], "MCH": [31], "DNC": [38],
-    "THM/BLM": [7, 25], "ARC/SMN": [27, 26], "RDM": [35], "PCT": [42],
+    "THM/BLM": [7, 25], "ARC/SMN": [27, 26], "RDM": [35], "PCT": [42], "BST": [43],
     "BLU (Limited)": [36],
 }
 SLOTS = ["Head", "Chest", "Arm", "Legs", "Feet",
@@ -42,11 +42,21 @@ def main():
         ms = models.get(str(item))
         return parts(ms[0])[:2] if ms else [0, 0]
 
-    def weapon_models(item):  # ([model,base,variant] main, [...] off or None)
+    def weapon_models(item, offhand=0):
+        """ ([model,base,variant] main, [...] off or None).
+
+        Most jobs' offhand rides along as a second model on the mainhand item
+        (PLD's shield, PCT's palette), so the CSV's Offhand column is normally
+        redundant. BST breaks that: its Hoplon is a separate item with its own
+        model, so fall back to the Offhand column when the mainhand names no
+        secondary. Jobs where the mainhand already supplies one are untouched.
+        """
         ms = models.get(str(item)) or []
         main = parts(ms[0]) if ms else [0, 0, 0]
-        off = parts(ms[1]) if len(ms) > 1 else None
-        return main, off
+        if len(ms) > 1:
+            return main, parts(ms[1])
+        oms = models.get(str(offhand)) if offhand else None
+        return main, (parts(oms[0]) if oms else None)
 
     by_job = {}
     for row in csv.DictReader(open(os.path.join(HERE, "Job Gear IDs.csv"))):
@@ -59,7 +69,7 @@ def main():
         gear = [itm(s) for s in SLOTS]
         gear_models = [armor_model(i) for i in gear]
         main = itm("Mainhand")
-        wmain, woff = weapon_models(main)
+        wmain, woff = weapon_models(main, itm("Offhand"))
         entry = {
             "weapon": main, "weaponModel": wmain, "weaponSub": woff,
             "gear": gear, "gearModels": gear_models,

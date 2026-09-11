@@ -85,7 +85,7 @@ public static class ReplayFormat
         [19] = "PLD", [20] = "MNK", [21] = "WAR", [22] = "DRG", [23] = "BRD", [24] = "WHM", [25] = "BLM",
         [26] = "ACN", [27] = "SMN", [28] = "SCH", [29] = "ROG", [30] = "NIN", [31] = "MCH", [32] = "DRK",
         [33] = "AST", [34] = "SAM", [35] = "RDM", [36] = "BLU", [37] = "GNB", [38] = "DNC", [39] = "RPR",
-        [40] = "SGE", [41] = "VPR", [42] = "PCT",
+        [40] = "SGE", [41] = "VPR", [42] = "PCT", [43] = "BST",
     };
 
     /// <summary>Packets whose presence marks a combat action (resolved per patch).</summary>

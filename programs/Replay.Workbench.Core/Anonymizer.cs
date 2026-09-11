@@ -235,7 +235,7 @@ public static class Anonymizer
                     if (BinaryPrimitives.ReadUInt32LittleEndian(span[e..]) == 0 &&
                         BinaryPrimitives.ReadUInt32LittleEndian(span[(e + 4)..]) == 0) continue; // empty slot
                     int job = bytes[e + ApJob];
-                    if (job is < 1 or > 42) continue; // not a member slot - leave it alone
+                    if (job is < 1 or > 43) continue; // not a member slot - leave it alone
                     WriteCustomize(bytes, e + ApCust, race);
                     var g = OpcodeData.GearForJob(job);
                     if (g is not null)

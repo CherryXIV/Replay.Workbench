@@ -14,6 +14,14 @@ we store the RAW models list per item and let build_afgear.py interpret it:
 This is a superset of the old [model, variant] map, so weapons get base+variant
 and the offhand too. One fetch per unique item id, cached in item_models.json.
 
+Garland lags a patch or two and has been seen to carry a brand-new item with an
+empty models list (BST's Hand Axe, a whole new weapon category, landed that way),
+so an item it cannot model falls back to XIVAPI's packed ModelMain/ModelSub. The
+packed u64 is four little-endian 16-bit quads in the same order Garland joins
+with dashes -- armor model-variant-stain, weapon model-base-variant-dye -- so the
+fallback reproduces Garland's own string byte for byte (verified against both
+shapes) and nothing downstream can tell which source a row came from.
+
 Usage:
     python tools/resolve_models.py
 """
@@ -28,18 +36,42 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 CSV = os.path.join(HERE, "Job Gear IDs.csv")
 OUT = os.path.join(HERE, "item_models.json")
 URL = "https://garlandtools.org/db/doc/item/en/3/{}.json"
+XIVAPI = "https://v2.xivapi.com/api/sheet/Item/{}?fields=ModelMain,ModelSub"
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
 
 
-def fetch_models(item_id):
-    req = urllib.request.Request(URL.format(item_id), headers={"User-Agent": UA})
+def _get(url):
+    req = urllib.request.Request(url, headers={"User-Agent": UA})
     with urllib.request.urlopen(req, timeout=15) as r:
-        data = json.load(r)
+        return json.load(r)
+
+
+def _dashed(packed):
+    """ Packed u64 -> Garland's dash string: four LE 16-bit quads in order. """
+    return "-".join(str((packed >> (16 * i)) & 0xFFFF) for i in range(4))
+
+
+def fetch_models_xivapi(item_id):
+    f = _get(XIVAPI.format(item_id)).get("fields", {})
+    main, sub = f.get("ModelMain") or 0, f.get("ModelSub") or 0
+    if not main:
+        return None
+    return [_dashed(main)] + ([_dashed(sub)] if sub else [])
+
+
+def fetch_models(item_id):
     # Raw model strings, e.g. ["2001-76-2-0", "2099-1-1-0"]. build_afgear.py
     # parses these per item type (armor vs weapon); we keep them verbatim.
-    return [str(m) for m in (data.get("item", {}).get("models") or [])] or None
+    try:
+        data = _get(URL.format(item_id))
+        models = [str(m) for m in (data.get("item", {}).get("models") or [])]
+        if models:
+            return models
+    except Exception as e:
+        print(f"    garland failed ({e}); trying xivapi")
+    return fetch_models_xivapi(item_id)
 
 
 def main():
@@ -55,7 +87,9 @@ def main():
 
     cache = {}
     if os.path.exists(OUT):
-        cache = {int(k): v for k, v in json.load(open(OUT)).items()}
+        # A null is a lookup that failed, not an answer -- drop it so the next
+        # run retries (a new item Garland had not indexed yet may resolve now).
+        cache = {int(k): v for k, v in json.load(open(OUT)).items() if v}
 
     todo = sorted(ids - set(cache))
     print(f"{len(ids)} unique items, {len(todo)} to fetch")

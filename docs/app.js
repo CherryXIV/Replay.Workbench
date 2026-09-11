@@ -66,7 +66,7 @@ const CHAPTER_TYPE_NAMES = {1:"Countdown",2:"Start/Restart",3:"Countdown(3)",4:"
 const JOB_ABBR = {0:"—",1:"GLA",2:"PGL",3:"MRD",4:"LNC",5:"ARC",6:"CNJ",7:"THM",
   19:"PLD",20:"MNK",21:"WAR",22:"DRG",23:"BRD",24:"WHM",25:"BLM",26:"ACN",27:"SMN",28:"SCH",
   29:"ROG",30:"NIN",31:"MCH",32:"DRK",33:"AST",34:"SAM",35:"RDM",36:"BLU",37:"GNB",38:"DNC",
-  39:"RPR",40:"SGE",41:"VPR",42:"PCT"};
+  39:"RPR",40:"SGE",41:"VPR",42:"PCT",43:"BST"};
 
 /* ---- app state ---- */
 let raw = null;          // Uint8Array of the loaded file
@@ -1324,7 +1324,7 @@ function applyAnonymizeIfChecked(bytes){
       for(let i=0;i<AP_LEN/AP_STRIDE;i++){
         const e=p+i*AP_STRIDE, job=bytes[e+AP_JOB];
         if(dv.getUint32(e,true)===0 && dv.getUint32(e+4,true)===0) continue; // empty slot
-        if(job<1 || job>42) continue; // not a member slot — leave it alone
+        if(job<1 || job>43) continue; // not a member slot — leave it alone
         writeCustomize(bytes,e+AP_CUST,race);
         const g=JOB_AF_GEAR[job];
         if(g){ g.gear.forEach((id,s)=>dv.setUint32(e+AP_GEAR+s*4,id,true)); dressed++; }
