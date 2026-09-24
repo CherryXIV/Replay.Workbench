@@ -24,6 +24,9 @@ namespace ReplayWorkbench.Core;
 /// <item>party-member appearance (1408B = 8x176, gear stored as item IDs;
 /// matched by length) - the "Party Members" portraits: race + AF gear +
 /// facewear/glasses id, plus mainhand/offhand weapon model</item>
+/// <item>NpcSpawn (656B) wearing a player's exact customize - a copy such as
+/// Phantom Kamaitachi's clone or M4S's mimic cells: race + AF gear +
+/// facewear/glasses id, plus the weapons when they are ones that player wore</item>
 /// <item>every name string, replaced length-preserving across the file</item>
 /// </list>
 ///
@@ -78,6 +81,7 @@ public static class Anonymizer
         var replayLen = BinaryPrimitives.ReadInt32LittleEndian(span[ReplayFormat.OffReplayLen..]);
         var spawnOp = PatchChain.Lookup(filePatch, "PlayerSpawn");
         var equipOp = PatchChain.Lookup(filePatch, "ModelEquip");
+        var npcOp = PatchChain.Lookup(filePatch, "NpcSpawn");
         // The status icon is re-sent after the spawn; see the note in pass 3.
         var iconOps = CharacterLayout.ActorControlOpNames
             .Select(n => PatchChain.Lookup(filePatch, n))
@@ -95,6 +99,14 @@ public static class Anonymizer
         // Actor id to job, so a ModelEquip can be redressed in the artifact set of
         // the job its owner's spawn packet gave them - see the branch in pass 3.
         var jobByOid = new Dictionary<uint, byte>();
+        // Actor id to the customize block as recorded, so an NPC wearing a copy of it
+        // can be recognised in pass 3 - after that player's own spawn has already been
+        // rewritten, which is why it is taken here.
+        var custByOid = new Dictionary<uint, byte[]>();
+        // Actor id to every weapon (packed u64) the character was seen wearing, in
+        // the spawn or a later gear change - a copy wears whichever is current, so
+        // any of them marks a copy's weapon as the player's own. See pass 3.
+        var weaponsByOid = new Dictionary<uint, HashSet<ulong>>();
         var keys = new List<ulong>();   // per-character keys, first-seen order
         var off = 0;
         while (off < replayLen)
@@ -108,7 +120,13 @@ public static class Anonymizer
             {
                 var nm = ReadName(bytes, p + lay.Name);
                 var oid = BinaryPrimitives.ReadUInt32LittleEndian(span[(b + 8)..]);
-                if (oid != 0) { oids.Add(oid); jobByOid[oid] = bytes[p + lay.Job]; }
+                if (oid != 0)
+                {
+                    oids.Add(oid);
+                    jobByOid[oid] = bytes[p + lay.Job];
+                    custByOid[oid] = span.Slice(p + lay.Customize, Customize.Length).ToArray();
+                    NoteWeapons(weaponsByOid, oid, span, p + lay.Weapon, p + lay.WeaponSub);
+                }
                 var key = BinaryPrimitives.ReadUInt64LittleEndian(span[(p + lay.CharacterKey)..]);
                 if (key != 0)
                 {
@@ -116,6 +134,12 @@ public static class Anonymizer
                 }
                 // A key of 0 identifies nobody, so those fall back to the name.
                 else if (nm.Length > 0 && !roster.Any(r => r.Name == nm)) roster.Add((0, nm));
+            }
+            else if (op == equipOp && len == CharacterLayout.ModelEquipLength)
+            {
+                var oid = BinaryPrimitives.ReadUInt32LittleEndian(span[(b + 8)..]);
+                NoteWeapons(weaponsByOid, oid, span,
+                    p + CharacterLayout.ModelEquipWeapon, p + CharacterLayout.ModelEquipWeaponSub);
             }
             off += ReplayFormat.SegHeader + len;
         }
@@ -179,7 +203,7 @@ public static class Anonymizer
         // Pass 3: race (+ gear) on spawn and appearance packets, and the name field.
         // The per-character name is written here, after the sweep, so it is the last
         // word on who each spawn packet belongs to.
-        int spawns = 0, dressed = 0, rosters = 0, icons = 0, equips = 0;
+        int spawns = 0, dressed = 0, rosters = 0, icons = 0, equips = 0, copies = 0;
         off = 0;
         while (off < replayLen)
         {
@@ -286,6 +310,31 @@ public static class Anonymizer
                 Array.Clear(bytes, p + CharacterLayout.ModelEquipDye2, PsDye2N);
                 equips++;
             }
+            else if (op == npcOp && len == CharacterLayout.NpcCopyLength &&
+                     CopyOf(span.Slice(p + CharacterLayout.NpcCopyCustomize, Customize.Length), custByOid) is { } who)
+            {
+                // An NPC wearing a player's looks - Phantom Kamaitachi's clone, M4S's
+                // mimic cells; see the NpcSpawn note in CharacterLayout. It is given the
+                // same generic customize and artifact set as that player's spawn, so
+                // the copy still matches the player it copies rather than the one it
+                // used to.
+                var g = OpcodeData.GearForJob(jobByOid[who]);
+                WriteCustomize(bytes, p + CharacterLayout.NpcCopyCustomize, race);
+                WriteGearModels(bytes, p + CharacterLayout.NpcCopyGear, g);
+                Array.Clear(bytes, p + CharacterLayout.NpcCopyDye2, PsDye2N);
+                BinaryPrimitives.WriteUInt16LittleEndian(span[(p + CharacterLayout.NpcCopyFacewear)..], 0);
+                // Only a weapon the player wore is theirs to replace; a copy that
+                // brings its own fixed weapons keeps them.
+                var worn = weaponsByOid.GetValueOrDefault(who);
+                if (worn is not null)
+                {
+                    if (worn.Contains(BinaryPrimitives.ReadUInt64LittleEndian(span[(p + CharacterLayout.NpcCopyWeapon)..])))
+                        WriteWeapon(span, p + CharacterLayout.NpcCopyWeapon, g?.WeaponModel);
+                    if (worn.Contains(BinaryPrimitives.ReadUInt64LittleEndian(span[(p + CharacterLayout.NpcCopyWeaponSub)..])))
+                        WriteWeapon(span, p + CharacterLayout.NpcCopyWeaponSub, g?.WeaponSub);
+                }
+                copies++;
+            }
             else if (Array.IndexOf(iconOps, op) >= 0 && len >= CharacterLayout.ActorControlMinLength &&
                      BinaryPrimitives.ReadUInt16LittleEndian(span[(p + CharacterLayout.ActorControlCategory)..]) ==
                      CharacterLayout.ActorControlSetStatusIcon)
@@ -331,7 +380,7 @@ public static class Anonymizer
 
         var note = $" · anonymized {roster.Count} players ({spawns} spawns, {dressed} dressed, " +
                    $"{rosters} roster entries, {icons} status icons, " +
-                   $"{equips} gear changes, " +
+                   $"{equips} gear changes, {copies} player copies, " +
                    $"{roster.Count} names→{nameHits} refs, {idMap.Count} ids→{idHits} refs";
         note += keyMap.Count > 0 ? $", {keyMap.Count} keys→{keyHits} refs)" : ")";
         return new AnonymizeResult { Note = note, KeyRemap = keyMap };
@@ -373,6 +422,30 @@ public static class Anonymizer
         Span<byte> b = stackalloc byte[8];
         Random.Shared.NextBytes(b);
         return BinaryPrimitives.ReadUInt64LittleEndian(b);
+    }
+
+    /// <summary>The player whose recorded customize block <paramref name="cust"/> is,
+    /// or null when it is nobody's.</summary>
+    private static uint? CopyOf(ReadOnlySpan<byte> cust, Dictionary<uint, byte[]> custByOid)
+    {
+        foreach (var (oid, c) in custByOid)
+            if (cust.SequenceEqual(c)) return oid;
+        return null;
+    }
+
+    /// <summary>Record the mainhand and offhand at <paramref name="main"/> and
+    /// <paramref name="sub"/> as weapons <paramref name="oid"/> wore. An empty slot is
+    /// not a weapon, so it is left out.</summary>
+    private static void NoteWeapons(Dictionary<uint, HashSet<ulong>> weaponsByOid, uint oid,
+        ReadOnlySpan<byte> span, int main, int sub)
+    {
+        if (oid == 0) return;
+        if (!weaponsByOid.TryGetValue(oid, out var set)) weaponsByOid[oid] = set = new HashSet<ulong>();
+        foreach (var at in new[] { main, sub })
+        {
+            var w = BinaryPrimitives.ReadUInt64LittleEndian(span[at..]);
+            if (w != 0) set.Add(w);
+        }
     }
 
     /// <summary>The name in a 32-byte field, up to its null terminator.</summary>

@@ -341,6 +341,56 @@ public static class CharacterLayout
     /// <summary>Per-slot second dye channel, as <see cref="SpawnLayout.Dye2"/>.</summary>
     public const int ModelEquipDye2 = 0x3C;
 
+    // ---- NpcSpawn: a copy of a player -----------------------------------------
+    //
+    // Some NPCs are spawned wearing a player's looks. The copy is an ordinary
+    // NpcSpawn, so none of the passes above reach it, and every time one appears
+    // it puts the original face, glamour and dyes back on screen. Two are measured,
+    // both on 7.56h recordings, and they share one layout:
+    //
+    // - Ninja's Phantom Kamaitachi (action 25774): nineteen casts, nineteen clones,
+    //   each owned by the ninja (actor id at +0x54).
+    // - M4S's mimic cells ("模倣細胞"): six copies of every party member, owned by
+    //   nobody (+0x54 reads E0000000).
+    //
+    // In both, the customize block, armor array, second dye channel and facewear
+    // are byte-identical to the player's PlayerSpawn, each 16 bytes earlier than in
+    // the 664-byte spawn. The weapons are the player's too, but the ones they are
+    // wearing *now*: in each recording a player swapped weapon mid-fight (a
+    // ModelEquip), and their copies wear the new weapon rather than the spawn's. The
+    // name is the NPC's own, never the player's.
+    //
+    // Since the owner field names nobody for the mimic cells, whose copy it is comes
+    // from the customize block itself: a spawn counts as a copy when its customize
+    // matches a player's exactly. That leaves Dark Knight's Living Shadow alone - it
+    // is owned and has a customize block, but a fixed one, identical in all sixteen
+    // spawns and nothing like its owner's. The weapons are only rewritten when they
+    // are one the player was seen wearing (spawn or ModelEquip), so a copy that
+    // brings fixed weapons of its own would keep them.
+    //
+    // Only the 656-byte NpcSpawn has been measured. Match the NpcSpawn opcode first:
+    // 656 is also the length of the 7.16h PlayerSpawn.
+
+    public const int NpcCopyLength = 656;
+
+    /// <summary>Mainhand, packed exactly as <see cref="SpawnLayout.Weapon"/>.</summary>
+    public const int NpcCopyWeapon = 0x20;
+
+    /// <summary>Offhand, packed exactly as <see cref="SpawnLayout.WeaponSub"/>.</summary>
+    public const int NpcCopyWeaponSub = 0x28;
+
+    /// <summary><see cref="GearSlots"/> slots, the same form as <see cref="SpawnLayout.Gear"/>.</summary>
+    public const int NpcCopyGear = 524;
+
+    /// <summary>Per-slot second dye channel, as <see cref="SpawnLayout.Dye2"/>.</summary>
+    public const int NpcCopyDye2 = 564;
+
+    /// <summary>Facewear/glasses model id (u16), as <see cref="SpawnLayout.Facewear"/>.</summary>
+    public const int NpcCopyFacewear = 574;
+
+    /// <summary>The 26-byte customize block, as <see cref="SpawnLayout.Customize"/>.</summary>
+    public const int NpcCopyCustomize = 610;
+
     /// <summary>Armor slot order, shared by both packets.</summary>
     public static readonly string[] GearSlotNames =
     {

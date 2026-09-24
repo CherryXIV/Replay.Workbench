@@ -1101,6 +1101,9 @@ function stripPartyPortraitsIfChecked(bytes){
      ModelEquip (72B)            — a gear change made during the recording. It stores
        armor and both weapons the way the spawn packet does, so redressing the spawn
        alone buys a few seconds of anonymity and then hands the original glamour back.
+     NpcSpawn (656B) wearing a player's exact customize — a copy such as Phantom
+       Kamaitachi's clone or M4S's mimic cells: race + AF gear + facewear id, plus
+       the weapons when they are ones that player wore. See NC_LEN.
      plus every name string, replaced length-preserving across the file.
    AF gear comes from JOB_AF_GEAR (afgear.js): item IDs for the appearance packet,
    [model,variant] armor + [model,base,variant] weapon for the spawn packet.
@@ -1212,6 +1215,23 @@ const AC_OP_NAMES=["ActorControl","ActorControlSelf","ActorControlTarget"];
 // job byte is a fallback and not the primary join: whose gear this is comes from the
 // segment header's object id, the same actor id the character's PlayerSpawn carries.
 const ME_LEN=72, ME_WEAPON=0x00, ME_WEAPON_SUB=0x08, ME_JOB=0x11, ME_GEAR=0x14, ME_DYE2=0x3C;
+// NpcSpawn copy of a player: some NPCs are spawned wearing a player's looks. Two
+// are measured, both on 7.56h recordings, sharing one layout — Ninja's Phantom
+// Kamaitachi (action 25774; 19 clones, owned by the ninja at +0x54) and M4S's mimic
+// cells ("模倣細胞"; six copies of every party member, owned by nobody — +0x54 reads
+// E0000000). In both, customize, armor, second dye channel and facewear are
+// byte-identical to the player's PlayerSpawn, 16 bytes earlier than in the 664-byte
+// spawn. The weapons are the player's too, but the ones worn *now*: in each
+// recording a player swapped weapon mid-fight (a ModelEquip) and their copies wear
+// the new one. The name is the NPC's own.
+// With no owner to go on for the mimic cells, a spawn counts as a copy when its
+// customize matches a player's exactly. That leaves Dark Knight's Living Shadow
+// alone: owned, with a customize block, but a fixed one nothing like its owner's.
+// Weapons are only rewritten when they are one the player was seen wearing, so a
+// copy with fixed weapons of its own would keep them.
+// Only 656 has been measured; match the NpcSpawn opcode first, since 656 is also the
+// 7.16h PlayerSpawn's length.
+const NC_LEN=656, NC_WEAPON=0x20, NC_WEAPON_SUB=0x28, NC_GEAR=524, NC_DYE2=564, NC_FACE=574, NC_CUST=610;
 
 // Dress a 10-slot armor array — [model u16][variant u8][dye u8] per slot — in the
 // job's artifact models, or clear it outright when the job has no set. Shared by
@@ -1240,6 +1260,15 @@ function writeWeapon(dv,at,wm){
   dv.setUint16(at+4, wm?wm[2]:0, true);
   dv.setUint16(at+6, 0, true);          // dye
 }
+// The player whose recorded customize block the NpcSpawn at `p` wears, or null when
+// it is nobody's — see NC_LEN.
+function copyOf(bytes,p,custByOid){
+  outer: for(const [oid,cust] of custByOid){
+    for(let i=0;i<cust.length;i++) if(bytes[p+NC_CUST+i]!==cust[i]) continue outer;
+    return oid;
+  }
+  return null;
+}
 // Overwrite every occurrence of `needle` with `repl` (same length) in place.
 function replaceBytes(buf,needle,repl){
   const n=needle.length; let count=0;
@@ -1261,6 +1290,7 @@ function applyAnonymizeIfChecked(bytes){
   const spawnTable=patchTable(filePatch);
   const spawnOp=spawnTable ? spawnTable.PlayerSpawn : null;
   const equipOp=spawnTable ? spawnTable.ModelEquip : null;
+  const npcOp=spawnTable ? spawnTable.NpcSpawn : null;
   const iconOps=new Set(spawnTable ? AC_OP_NAMES.map(n=>spawnTable[n]).filter(o=>o!=null) : []);
   const td=new TextDecoder();
 
@@ -1271,6 +1301,17 @@ function applyAnonymizeIfChecked(bytes){
   // Actor id -> job, so a ModelEquip can be redressed in the artifact set of the job
   // its owner's spawn packet gave them — see the ModelEquip branch in pass 2.
   const jobByOid=new Map();
+  // Actor id -> customize block as recorded, so an NPC wearing a copy of it can be
+  // recognised in pass 2, after that player's own spawn has already been rewritten.
+  const custByOid=new Map();
+  // Actor id -> every weapon (as a u64 BigInt) the character was seen wearing, in
+  // the spawn or a later gear change: a copy wears whichever is current.
+  const weaponsByOid=new Map();
+  const noteWeapons=(oid,main,sub)=>{
+    if(!oid) return;
+    if(!weaponsByOid.has(oid)) weaponsByOid.set(oid,new Set());
+    for(const at of [main,sub]){ const w=dv.getBigUint64(at,true); if(w) weaponsByOid.get(oid).add(w); }
+  };
   let off=0;
   while(off<replayLen){
     const b=DATA_START+off, op=dv.getUint16(b,true), len=dv.getUint16(b+2,true), p=b+SEG_HEADER;
@@ -1280,7 +1321,9 @@ function applyAnonymizeIfChecked(bytes){
       const nm=td.decode(bytes.subarray(p+L.name,end));
       if(nm && !labels.has(nm)) labels.set(nm,`Player ${labels.size+1}`);
       const oid=dv.getUint32(b+8,true);
-      if(oid){ oids.add(oid); jobByOid.set(oid,bytes[p+L.job]); }
+      if(oid){ oids.add(oid); jobByOid.set(oid,bytes[p+L.job]); custByOid.set(oid,bytes.slice(p+L.cust,p+L.cust+26)); noteWeapons(oid,p+L.weapon,p+L.weaponSub); }
+    } else if(equipOp!=null && op===equipOp && len===ME_LEN){
+      noteWeapons(dv.getUint32(b+8,true),p+ME_WEAPON,p+ME_WEAPON_SUB);
     }
     off+=SEG_HEADER+len;
   }
@@ -1297,7 +1340,7 @@ function applyAnonymizeIfChecked(bytes){
   }
 
   // Pass 2: race (+ gear) on spawn and appearance packets.
-  let spawns=0, appears=0, dressed=0, rosters=0, icons=0, equips=0;
+  let spawns=0, appears=0, dressed=0, rosters=0, icons=0, equips=0, copies=0;
   off=0;
   while(off<replayLen){
     const b=DATA_START+off, op=dv.getUint16(b,true), len=dv.getUint16(b+2,true), p=b+SEG_HEADER;
@@ -1356,6 +1399,22 @@ function applyAnonymizeIfChecked(bytes){
       writeWeapon(dv,p+ME_WEAPON_SUB,g&&g.weaponSub);
       bytes.fill(0,p+ME_DYE2,p+ME_DYE2+PS_DYE2_N);
       equips++;
+    } else if(npcOp!=null && op===npcOp && len===NC_LEN && copyOf(bytes,p,custByOid)!=null){
+      // An NPC wearing a player's looks — see NC_LEN. It gets the same generic
+      // customize and artifact set as that player's spawn, so the copy still matches
+      // the player it copies rather than the one it used to.
+      const who=copyOf(bytes,p,custByOid), g=JOB_AF_GEAR[jobByOid.get(who)];
+      writeCustomize(bytes,p+NC_CUST,race);
+      writeGearModels(bytes,dv,p+NC_GEAR,g);
+      bytes.fill(0,p+NC_DYE2,p+NC_DYE2+PS_DYE2_N);
+      dv.setUint16(p+NC_FACE,0,true);
+      // Only a weapon the player wore is theirs to replace.
+      const worn=weaponsByOid.get(who);
+      if(worn){
+        if(worn.has(dv.getBigUint64(p+NC_WEAPON,true)))     writeWeapon(dv,p+NC_WEAPON,g&&g.weaponModel);
+        if(worn.has(dv.getBigUint64(p+NC_WEAPON_SUB,true))) writeWeapon(dv,p+NC_WEAPON_SUB,g&&g.weaponSub);
+      }
+      copies++;
     } else if(iconOps.has(op) && len>=AC_MIN_LEN && dv.getUint16(p+AC_CATEGORY,true)===AC_STATUS_ICON){
       // The spawn byte above is not the last word on the icon — see AC_STATUS_ICON.
       dv.setUint32(p+AC_PARAM1,ANON_ONLINE_STATUS,true);
@@ -1383,7 +1442,7 @@ function applyAnonymizeIfChecked(bytes){
     idHits+=replaceBytes(bytes,need,rep);
   }
 
-  return ` · anonymized ${labels.size} players (${spawns} spawns, ${dressed} dressed, ${rosters} roster entries, ${icons} status icons, ${equips} gear changes, ${idMap.size} ids→${idHits} refs)`;
+  return ` · anonymized ${labels.size} players (${spawns} spawns, ${dressed} dressed, ${rosters} roster entries, ${icons} status icons, ${equips} gear changes, ${copies} player copies, ${idMap.size} ids→${idHits} refs)`;
 }
 
 // Enable the race dropdown only while "Anonymize players" is checked.
