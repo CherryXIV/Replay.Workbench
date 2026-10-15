@@ -73,6 +73,17 @@
   .dev-hint{font-size:12px;color:var(--muted)}
   .dev-hint.dev-err{color:var(--danger)}
   .dev-foot{display:flex;align-items:center;gap:8px;padding:10px 14px;border-top:1px solid var(--border)}
+
+  /* about */
+  .about{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:18px 28px}
+  .about h3{font-size:13px;font-weight:600;margin-bottom:6px}
+  .about p,.about li{font-size:13px;color:var(--muted)}
+  .about ul{padding-left:18px}
+  .about li+li{margin-top:2px}
+  .about .links{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+  .about .links a{text-decoration:none;font-size:12px;color:var(--text);background:var(--surface);
+    border:1px solid var(--border);border-radius:var(--radius);padding:4px 10px}
+  .about .links a:hover{border-color:var(--accent);color:var(--accent)}
 </style>
 </head>
 <body>
@@ -83,6 +94,7 @@
     <nav>
       <a href="opcodeinspector.html">Opcode inspector</a>
       <a href="old/">Previous version</a>
+      <a href="https://github.com/CherryXIV/Replay.Workbench" target="_blank" rel="noopener noreferrer">GitHub</a>
     </nav>
   </header>
   <p class="tagline">Open a duty recording to inspect its header, rename players, and export a single
@@ -196,8 +208,42 @@
     </section>
   </div>
 
+  <section class="panel" id="p-about">
+    <div class="head"><h2>About</h2><span class="meta">Opcodes current to patch <span class="mono" id="about-patch">—</span></span></div>
+    <div class="body about">
+      <div>
+        <h3>What it does</h3>
+        <ul>
+          <li>Reads the recording header, pulls, and combat timing</li>
+          <li>Exports a single pull as its own <span class="mono">.dat</span>, with waymarks and countdown</li>
+          <li>Renames or fully anonymizes players</li>
+          <li>Transposes older recordings to the current patch's opcodes</li>
+        </ul>
+      </div>
+      <div>
+        <h3>Desktop app</h3>
+        <p>A Windows build of the same editor, with a per-character appearance editor (race, face, gear, dyes, weapons)
+          the browser version doesn't have. Build it from <a href="https://github.com/CherryXIV/Replay.Workbench/tree/main/programs" target="_blank" rel="noopener noreferrer">programs/</a> in the repository.</p>
+      </div>
+      <div>
+        <h3>Privacy</h3>
+        <p>Recordings are read and edited entirely in this tab. Nothing is uploaded, and nothing is stored once you close or refresh the page.</p>
+      </div>
+      <div>
+        <h3>Source &amp; feedback</h3>
+        <p>Open source on GitHub. Bug reports, recordings that don't parse, and patch-day breakage are welcome as issues.</p>
+        <div class="links">
+          <a href="https://github.com/CherryXIV/Replay.Workbench" target="_blank" rel="noopener noreferrer">View on GitHub</a>
+          <a href="https://github.com/CherryXIV/Replay.Workbench/issues/new" target="_blank" rel="noopener noreferrer">Report an issue</a>
+        </div>
+      </div>
+    </div>
+  </section>
+
   <footer>
     Replay Workbench · <a href="opcodeinspector.html">Opcode inspector</a> · <a href="old/">Previous version</a>
+    · <a href="https://github.com/CherryXIV/Replay.Workbench" target="_blank" rel="noopener noreferrer">GitHub</a>
+    · Opcode names from <a href="https://github.com/karashiiro/FFXIVOpcodes" target="_blank" rel="noopener noreferrer">karashiiro/FFXIVOpcodes</a>
   </footer>
 </div>
 
@@ -236,5 +282,6 @@
 <script src="afgear.js"></script>
 <script src="app.js"></script>
 <script src="shell.js"></script>
+<script>document.getElementById("about-patch").textContent=LATEST_PATCH;</script>
 </body>
 </html>
