@@ -1,0 +1,138 @@
+/* Shared by index.html and opcodeinspector.html: colors, type, and the
+   pieces both pages use (header, drop zone, panels, readout grid, buttons,
+   toast, footer). Page-specific rules stay in each page's <style>.
+
+   Color carries meaning where it can: amber is the recorder, pink is
+   waymarks, and jobs take their in-game role color (tank / healer / DPS).
+   --cat-0..5 tell neighbouring pulls apart on the timeline. */
+:root{
+  color-scheme:light dark;
+  --bg:#f3f4f8;
+  --surface:#ffffff;
+  --surface-2:#eef0f6;
+  --border:#d6d9e3;
+  --text:#1b1e27;
+  --muted:#596074;
+  --faint:#8a90a2;
+  --accent:#4a5bd8;
+  --accent-soft:#e6e9fb;
+  --accent-ink:#ffffff;
+  --rec:#b06d00;          /* recorder / needs attention */
+  --rec-soft:#fbefd9;
+  --mark:#c2387f;         /* waymarks, name hits */
+  --mark-soft:rgba(194,56,127,.14);
+  --ok:#1f8a4c;
+  --danger:#cc3a2f;
+  --tank:#2f6fd6;
+  --healer:#1f8a4c;
+  --dps:#c8423a;
+  --cat-0:#4a5bd8; --cat-1:#14968a; --cat-2:#c97a00;
+  --cat-3:#c2387f; --cat-4:#6b4fc8; --cat-5:#3a8d2f;
+  --radius:5px;
+  --mono:ui-monospace,"SF Mono","Cascadia Mono",Consolas,Menlo,monospace;
+  --sans:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+}
+@media (prefers-color-scheme:dark){
+  :root{
+    --bg:#11141c;
+    --surface:#191d28;
+    --surface-2:#212635;
+    --border:#2e3446;
+    --text:#e4e7f0;
+    --muted:#a0a7bb;
+    --faint:#6b7288;
+    --accent:#8191ff;
+    --accent-soft:rgba(129,145,255,.15);
+    --accent-ink:#0d1030;
+    --rec:#f0b552;
+    --rec-soft:rgba(240,181,82,.14);
+    --mark:#ef79b6;
+    --mark-soft:rgba(239,121,182,.2);
+    --ok:#5cc98a;
+    --danger:#f06a5e;
+    --tank:#6ba1ff;
+    --healer:#5cc98a;
+    --dps:#f0716a;
+    --cat-0:#8191ff; --cat-1:#3cc7b8; --cat-2:#f0b552;
+    --cat-3:#ef79b6; --cat-4:#b096ff; --cat-5:#7fcf5a;
+  }
+}
+
+*{box-sizing:border-box;margin:0;padding:0}
+body{
+  background:var(--bg);color:var(--text);
+  font-family:var(--sans);font-size:14px;line-height:1.5;
+}
+a{color:var(--accent)}
+.wrap{max-width:1080px;margin:0 auto;padding:24px 20px 64px}
+.hidden{display:none !important}
+.mono{font-family:var(--mono)}
+
+/* header */
+header.app{display:flex;align-items:center;gap:12px;flex-wrap:wrap;
+  padding-bottom:14px;margin-bottom:16px;border-bottom:1px solid var(--border)}
+header.app h1{font-size:19px;font-weight:650}
+header.app .sub{font-size:13px;color:var(--muted)}
+header.app nav{margin-left:auto;display:flex;gap:4px;font-size:13px}
+header.app nav a{color:var(--muted);text-decoration:none;padding:4px 10px;border-radius:var(--radius)}
+header.app nav a:hover{color:var(--accent);background:var(--accent-soft)}
+.tagline{color:var(--muted);margin-bottom:18px;max-width:70ch}
+
+/* drop zone */
+.drop{display:block;border:2px dashed var(--border);border-radius:var(--radius);
+  background:var(--surface);padding:40px 20px;text-align:center;cursor:pointer}
+.drop:hover,.drop.over{border-color:var(--accent);background:var(--accent-soft)}
+.drop.compact{padding:9px 20px;text-align:left;border-width:1px}
+.drop .big{font-size:15px;margin-bottom:4px}
+.drop .big b{color:var(--accent)}
+.drop.compact .big{font-size:13px;margin:0}
+.drop.compact .small{display:none}
+.drop .small{font-size:13px;color:var(--muted)}
+input[type=file]{display:none}
+
+/* panels */
+.panel{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+  margin-top:16px;overflow:hidden}
+.panel > .head{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;
+  padding:9px 14px;border-bottom:1px solid var(--border);background:var(--surface-2)}
+.panel > .head h2{font-size:14px;font-weight:600}
+.panel > .head .meta{font-size:13px;color:var(--accent)}
+.panel > .body{padding:14px}
+
+/* key/value readout */
+.readout{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr))}
+.readout .cell{padding:10px 14px;border-bottom:1px solid var(--border);border-right:1px solid var(--border);margin:0 -1px -1px 0}
+.readout .k{font-size:12px;color:var(--muted);margin-bottom:2px}
+.readout .k::first-letter{text-transform:uppercase}
+.readout .v{font-family:var(--mono);font-size:13px;overflow-wrap:anywhere}
+.readout .v.amber{color:var(--rec)}
+.readout .v.cyan{color:var(--accent)}
+.role-tank{color:var(--tank)}
+.role-healer{color:var(--healer)}
+.role-dps{color:var(--dps)}
+
+/* buttons */
+button{font:inherit}
+button.act,button.ghost{font-size:13px;border-radius:var(--radius);padding:7px 14px;cursor:pointer;white-space:nowrap}
+button.act{background:var(--accent);color:var(--accent-ink);border:1px solid var(--accent);font-weight:600}
+button.act:hover{filter:brightness(1.1)}
+button.act:disabled{background:var(--surface-2);border-color:var(--border);color:var(--faint);cursor:not-allowed;filter:none}
+button.ghost{background:var(--surface);color:var(--text);border:1px solid var(--border)}
+button.ghost:hover{border-color:var(--accent);color:var(--accent)}
+button.sm{padding:4px 10px;font-size:12px}
+
+select,input[type=text],textarea{font:inherit;font-size:13px;color:var(--text);background:var(--surface);
+  border:1px solid var(--border);border-radius:var(--radius);padding:5px 8px}
+select:focus,input[type=text]:focus,textarea:focus{outline:2px solid var(--accent-soft);border-color:var(--accent)}
+
+/* toast */
+#toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);
+  background:var(--surface);color:var(--text);border:1px solid var(--border);border-left:4px solid var(--ok);
+  box-shadow:0 6px 20px rgba(0,0,0,.18);font-size:13px;padding:9px 14px;border-radius:var(--radius);
+  opacity:0;pointer-events:none;transition:opacity .15s;z-index:50;max-width:90vw}
+#toast.show{opacity:1}
+#toast.err{border-left-color:var(--danger)}
+
+footer{margin-top:36px;padding-top:14px;border-top:1px solid var(--border);font-size:12px;color:var(--faint)}
+footer a{color:var(--muted)}
+footer a:hover{color:var(--accent)}

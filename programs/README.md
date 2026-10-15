@@ -14,16 +14,15 @@ programs/
 
 The core library has no UI references and no `System.Windows.Forms` dependency —
 it is just the `.dat` format and the opcode chain. The GUI is a thin shell that
-reads options off checkboxes and calls into it. If the playback map viewer ever
-gets a desktop version (ImGui, Avalonia, anything), none of the format work has
-to be redone.
+reads options off checkboxes and calls into it. Any other front end (ImGui,
+Avalonia, anything) would reuse the format work as-is.
 
 WinForms was picked over ImGui because the editor is a data panel: a readout
 grid, two tables, editable name fields, checkboxes, one custom-drawn timeline,
 and a save dialog. WinForms does all of that with zero NuGet dependencies and a
 real native save dialog — the thing the web version has to fight the browser
 for. ImGui would need a render backend plus native DLLs and has no file dialogs;
-its advantage (cheap 60fps redraw) only matters for playback, which isn't here.
+its advantage (cheap 60fps redraw) buys nothing for a static data panel.
 
 ## Build and run
 
@@ -129,6 +128,6 @@ back moves zero bytes, every field round-trips through a write/re-read, editing
 one character leaves everyone else byte-identical, and a one-byte edit writes
 exactly one byte per packet.
 
-Not ported: the **Playback** map viewer (`docs/timeline.js`) and the standalone
-**Opcode Inspector** page. Both are separate tools rather than part of the
-editor; the core library already exposes everything either would need.
+Not ported: the standalone **Opcode Inspector** page. It is a separate tool
+rather than part of the editor; the core library already exposes everything it
+would need.

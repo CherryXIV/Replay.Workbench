@@ -3,199 +3,110 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Opcode Inspector - Replay Workbench</title>
+<title>Opcode Inspector · Replay Workbench</title>
+<link rel="stylesheet" href="base.css">
 <style>
-  /* ---- design tokens (shared with the main workbench) ----
-     Subject: a raw packet sniffer for FFXIV duty recordings (.dat).
-     Direction: instrument panel. Dark slate, phosphor-cyan readouts, amber for
-     the things that need a human's attention (unidentified / custom opcodes).
-     Monospace data, one humanist sans for chrome. */
-  :root{
-    --bg:#0d1117;
-    --panel:#141b24;
-    --panel-2:#1b2531;
-    --line:#263344;
-    --ink:#d6e2f0;
-    --ink-dim:#7d8da0;
-    --ink-faint:#4d5a6b;
-    --phosphor:#39d4c8;       /* primary readout */
-    --phosphor-deep:#1c6f6a;
-    --amber:#f2b84c;          /* unidentified / custom opcodes */
-    --violet:#8b7cf6;         /* name hits */
-    --danger:#e8654f;
-    --radius:6px;
-    --mono:"JetBrains Mono",ui-monospace,"SF Mono",Menlo,Consolas,monospace;
-    --sans:"Inter",-apple-system,system-ui,sans-serif;
-  }
-  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap');
+  .tagline b{font-weight:600;color:var(--text)}
 
-  *{box-sizing:border-box;margin:0;padding:0}
-  html,body{height:100%}
-  body{
-    background:var(--bg);color:var(--ink);font-family:var(--sans);
-    font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased;
-    background-image:radial-gradient(circle at 50% -10%, rgba(57,212,200,.05), transparent 60%);
-  }
-  .wrap{max-width:1100px;margin:0 auto;padding:32px 24px 80px}
-
-  /* ---- header ---- */
-  header.app{display:flex;align-items:baseline;gap:16px;flex-wrap:wrap;margin-bottom:6px}
-  header.app h1{font-family:var(--mono);font-weight:700;font-size:20px;letter-spacing:-.01em;color:var(--ink)}
-  header.app h1 .dot{color:var(--phosphor)}
-  header.app .sub{font-family:var(--mono);font-size:12px;color:var(--ink-dim)}
-  .tabs-nav{margin-left:auto;display:flex;gap:8px}
-  .tablink{font-family:var(--mono);font-size:12px;color:var(--ink-dim);background:transparent;text-decoration:none;
-    border:1px solid var(--line);border-radius:var(--radius);padding:6px 14px;cursor:pointer;transition:all .12s}
-  .tablink:hover{color:var(--ink);border-color:var(--ink-faint)}
-  .tablink.cur{color:var(--phosphor);border-color:var(--phosphor-deep);background:rgba(57,212,200,.06)}
-  .tagline{color:var(--ink-dim);font-size:13px;margin-bottom:22px;max-width:72ch}
-  .tagline b{color:var(--phosphor);font-weight:500}
-
-  /* ---- drop zone ---- */
-  .drop{display:block;border:1px dashed var(--line);border-radius:var(--radius);
-    background:linear-gradient(180deg,var(--panel),transparent);
-    padding:48px 24px;text-align:center;cursor:pointer;transition:border-color .15s,background .15s,padding .15s}
-  .drop:hover,.drop.over{border-color:var(--phosphor);background:rgba(57,212,200,.04)}
-  .drop.compact{padding:14px 24px}
-  .drop .big{font-family:var(--mono);font-size:15px;color:var(--ink);margin-bottom:6px}
-  .drop.compact .big{font-size:12px;margin:0}
-  .drop .small{font-size:12px;color:var(--ink-dim)}
-  .drop .small b{color:var(--phosphor);font-weight:500}
-  input[type=file]{display:none}
-
-  /* ---- panels ---- */
-  .panel{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);margin-top:20px;overflow:hidden}
-  .panel > .head{display:flex;align-items:center;justify-content:space-between;gap:12px;
-    padding:12px 16px;border-bottom:1px solid var(--line);background:var(--panel-2);flex-wrap:wrap}
-  .panel > .head h2{font-family:var(--mono);font-size:12px;font-weight:500;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-dim)}
-  .panel > .head .meta{font-family:var(--mono);font-size:12px;color:var(--phosphor)}
-  .panel > .body{padding:16px}
-
-  /* ---- header readout grid ---- */
-  .readout{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:1px;background:var(--line)}
-  .readout .cell{background:var(--panel);padding:12px 14px}
-  .readout .k{font-family:var(--mono);font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-faint);margin-bottom:4px}
-  .readout .v{font-family:var(--mono);font-size:14px;color:var(--ink);word-break:break-all}
-  .readout .v.cyan{color:var(--phosphor)}
-  .readout .v.amber{color:var(--amber)}
-
-  /* ---- finder cards ---- */
-  .finder{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  /* opcode finder */
+  .finder{display:grid;grid-template-columns:1fr 1fr;gap:12px}
   @media(max-width:680px){.finder{grid-template-columns:1fr}}
-  .fcard{background:var(--panel-2);border:1px solid var(--line);border-radius:var(--radius);padding:14px 16px}
-  .fcard h3{font-family:var(--mono);font-size:13px;color:var(--ink);margin-bottom:2px}
-  .fcard .desc{font-size:12px;color:var(--ink-dim);margin-bottom:12px;line-height:1.45}
-  .fcard.hit{border-color:var(--phosphor-deep);box-shadow:inset 0 0 0 1px rgba(57,212,200,.12)}
-  .fbig{font-family:var(--mono);font-size:30px;font-weight:700;color:var(--phosphor);line-height:1.1}
-  .fbig.none{color:var(--ink-faint);font-size:18px;font-weight:500}
-  .fhex{font-family:var(--mono);font-size:12px;color:var(--ink-dim);margin-top:2px}
-  .fwhy{font-family:var(--mono);font-size:11px;color:var(--ink-dim);margin-top:10px;line-height:1.5}
-  .fwhy .ok{color:var(--phosphor)}
-  .fwhy .warn{color:var(--amber)}
-  .copybtn{font-family:var(--mono);font-size:11px;background:transparent;color:var(--ink-dim);
-    border:1px solid var(--line);border-radius:4px;padding:3px 9px;cursor:pointer;margin-left:8px;vertical-align:2px}
-  .copybtn:hover{color:var(--phosphor);border-color:var(--phosphor-deep)}
-  .alt{font-family:var(--mono);font-size:11px;color:var(--ink-faint);margin-top:10px}
-  .alt b{color:var(--ink-dim);font-weight:500}
-  .alt .pick{color:var(--amber);cursor:pointer;text-decoration:underline dotted}
-  .alt .pick:hover{color:var(--phosphor)}
+  .fcard{border:1px solid var(--border);border-top:3px solid var(--border);border-radius:var(--radius);padding:12px 14px}
+  .fcard h3{font-size:14px;font-weight:600;margin-bottom:2px}
+  .fcard .desc{font-size:12px;color:var(--muted);margin-bottom:10px}
+  .fcard.hit{border-top-color:var(--ok)}
+  .fbig{font-family:var(--mono);font-size:26px;font-weight:600;line-height:1.15;color:var(--accent)}
+  .fbig.none{color:var(--faint);font-size:16px;font-weight:400}
+  .fhex{font-family:var(--mono);font-size:12px;color:var(--muted);margin-top:2px}
+  .fwhy{font-size:12px;color:var(--muted);margin-top:10px}
+  .fwhy .ok{color:var(--ok)}
+  .fwhy .warn{color:var(--rec)}
+  .copybtn{font-size:11px;background:var(--surface);color:var(--muted);
+    border:1px solid var(--border);border-radius:var(--radius);padding:2px 8px;cursor:pointer;margin-left:8px;vertical-align:4px}
+  .copybtn:hover{color:var(--text);background:var(--surface-2)}
+  .alt{font-size:12px;color:var(--faint);margin-top:10px}
+  .alt b{color:var(--muted);font-weight:500}
+  .alt .pick{font-family:var(--mono);color:var(--accent);cursor:pointer;text-decoration:underline}
 
-  /* ---- name-table control row ---- */
-  .ctlrow{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
-  .ctlrow label{font-family:var(--mono);font-size:11px;color:var(--ink-faint);text-transform:uppercase;letter-spacing:.06em}
-  select,.tinput{font-family:var(--mono);font-size:12px;background:var(--bg);border:1px solid var(--line);
-    border-radius:4px;color:var(--ink);padding:6px 8px}
-  select:focus,.tinput:focus{outline:none;border-color:var(--phosphor)}
-  .tinput{flex:1;min-width:140px}
-  button.ghost{font-family:var(--mono);font-size:12px;background:transparent;color:var(--ink-dim);
-    border:1px solid var(--line);border-radius:var(--radius);padding:6px 12px;cursor:pointer}
-  button.ghost:hover{color:var(--ink);border-color:var(--ink-faint)}
-
-  /* ---- census table ---- */
-  .toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:10px 16px;border-bottom:1px solid var(--line);background:var(--panel-2)}
+  /* census table */
+  .toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:8px 14px;border-bottom:1px solid var(--border);background:var(--surface-2)}
   .toolbar .grow{flex:1}
-  .chk{display:flex;align-items:center;gap:6px;font-family:var(--mono);font-size:11px;color:var(--ink-dim);cursor:pointer;user-select:none}
-  .chk input{accent-color:var(--phosphor);width:13px;height:13px}
+  .ctlrow{display:flex;align-items:center;gap:8px}
+  .ctlrow label{font-size:13px;color:var(--muted)}
+  .tinput{flex:1;min-width:140px}
+  .chk{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--muted);cursor:pointer;user-select:none}
+  .chk input{accent-color:var(--accent)}
   table.opc{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:12.5px}
-  table.opc th{text-align:left;font-weight:500;font-size:10px;letter-spacing:.07em;text-transform:uppercase;
-    color:var(--ink-faint);padding:8px 12px;border-bottom:1px solid var(--line);cursor:pointer;white-space:nowrap}
-  table.opc th:hover{color:var(--ink-dim)}
-  table.opc th .ar{color:var(--phosphor)}
-  table.opc td{padding:7px 12px;border-bottom:1px solid var(--panel-2);color:var(--ink);white-space:nowrap}
+  table.opc th{text-align:left;font-family:var(--sans);font-weight:500;font-size:12px;color:var(--muted);
+    padding:7px 12px;border-bottom:1px solid var(--border);cursor:pointer;white-space:nowrap;
+    position:sticky;top:0;background:var(--surface)}
+  table.opc th:hover{color:var(--text)}
+  table.opc th .ar{color:var(--accent)}
+  table.opc td{padding:6px 12px;border-bottom:1px solid var(--border);white-space:nowrap}
   table.opc tr{cursor:pointer}
-  table.opc tr:hover td{background:var(--panel-2)}
-  table.opc tr.sel td{background:rgba(57,212,200,.08)}
-  table.opc tr.sel td:first-child{box-shadow:inset 3px 0 0 var(--phosphor)}
-  .dec{color:var(--phosphor)}
-  .dim{color:var(--ink-dim)}
-  .nm{color:var(--ink)}
-  .nm.unk{color:var(--amber)}
-  .tag{display:inline-block;font-size:9px;letter-spacing:.05em;text-transform:uppercase;
-    border:1px solid var(--phosphor-deep);color:var(--phosphor);border-radius:3px;padding:1px 5px;margin-left:6px}
-  .tag.party{border-color:var(--violet);color:var(--violet)}
+  table.opc tbody tr:hover td{background:var(--surface-2)}
+  table.opc tr.sel td{background:var(--accent-soft)}
+  .dec{color:var(--accent)}
+  .dim{color:var(--muted)}
+  .nm.unk{color:var(--rec)}
+  .tag{display:inline-block;font-family:var(--sans);font-size:11px;border:1px solid var(--accent);color:var(--accent);
+    border-radius:3px;padding:0 4px;margin-left:6px}
+  .tag.party{border-color:var(--mark);color:var(--mark)}
   .scrollx{overflow-x:auto}
   .scrolly{max-height:420px;overflow-y:auto}
 
-  /* ---- hex inspector ---- */
-  .insp-head{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:12px;font-family:var(--mono);font-size:12px;color:var(--ink-dim)}
-  .insp-head b{color:var(--phosphor);font-weight:500}
-  .pktnav{display:flex;align-items:center;gap:8px}
-  .pktnav button{font-family:var(--mono);font-size:12px;background:var(--panel-2);color:var(--ink);
-    border:1px solid var(--line);border-radius:4px;padding:4px 10px;cursor:pointer}
-  .pktnav button:hover{border-color:var(--phosphor-deep)}
-  .pktnav button:disabled{color:var(--ink-faint);cursor:not-allowed;opacity:.5}
-  .seghdr{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:1px;background:var(--line);margin-bottom:12px;border:1px solid var(--line)}
-  .seghdr .c{background:var(--panel);padding:8px 10px}
-  .seghdr .c .k{font-family:var(--mono);font-size:9px;letter-spacing:.07em;text-transform:uppercase;color:var(--ink-faint)}
-  .seghdr .c .v{font-family:var(--mono);font-size:13px;color:var(--ink)}
-  pre.hex{font-family:var(--mono);font-size:12px;line-height:1.55;color:var(--ink);background:var(--bg);
-    border:1px solid var(--line);border-radius:4px;padding:12px;overflow-x:auto;max-height:360px;overflow-y:auto;white-space:pre}
-  pre.hex .off{color:var(--ink-faint)}
-  pre.hex .as{color:var(--ink-dim)}
-  pre.hex mark{background:rgba(139,124,246,.25);color:var(--violet);border-radius:2px}
+  /* hex inspector */
+  .insp-head{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:12px;font-size:13px;color:var(--muted)}
+  .insp-head b{color:var(--text);font-weight:600}
+  .pktnav{display:flex;align-items:center;gap:6px}
+  .pktnav button{font-size:12px;background:var(--surface);color:var(--text);
+    border:1px solid var(--border);border-radius:var(--radius);padding:3px 9px;cursor:pointer}
+  .pktnav button:hover{background:var(--surface-2)}
+  .pktnav button:disabled{color:var(--faint);cursor:not-allowed;background:var(--surface)}
+  .seghdr{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:1px;background:var(--border);margin-bottom:12px;border:1px solid var(--border)}
+  .seghdr .c{background:var(--surface);padding:6px 10px}
+  .seghdr .c .k{font-size:11px;color:var(--muted)}
+  .seghdr .c .v{font-family:var(--mono);font-size:13px}
+  pre.hex{font-family:var(--mono);font-size:12px;line-height:1.55;background:var(--surface-2);
+    border:1px solid var(--border);border-radius:var(--radius);padding:10px 12px;overflow-x:auto;max-height:360px;overflow-y:auto;white-space:pre}
+  pre.hex .off{color:var(--faint)}
+  pre.hex .as{color:var(--muted)}
+  mark{background:var(--mark-soft);color:var(--mark);border-radius:2px}
 
-  .hint{font-family:var(--mono);font-size:11px;color:var(--ink-dim);padding:12px 16px}
-  .hidden{display:none !important}
-
-  #toast{position:fixed;left:50%;bottom:28px;transform:translateX(-50%) translateY(20px);
-    background:var(--panel-2);border:1px solid var(--phosphor);color:var(--ink);
-    font-family:var(--mono);font-size:13px;padding:12px 18px;border-radius:var(--radius);
-    opacity:0;pointer-events:none;transition:all .2s;z-index:50;max-width:90vw}
-  #toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
-  #toast.err{border-color:var(--danger)}
-
-  footer{margin-top:40px;font-family:var(--mono);font-size:11px;color:var(--ink-faint);text-align:center;line-height:1.8}
-  footer b{color:var(--ink-dim);font-weight:500}
+  .hint{font-size:12px;color:var(--muted);padding:10px 14px}
 </style>
 </head>
 <body>
 <div class="wrap">
   <header class="app">
-    <h1>Opcode<span class="dot">.</span>Inspector</h1>
-    <span class="sub">FFXIV .dat packet sniffer</span>
+    <h1>Opcode Inspector</h1>
+    <span class="sub">Packet listing for FFXIV duty recordings (.dat)</span>
+    <nav>
+      <a href="index.html">Replay Workbench</a>
+    </nav>
   </header>
   <p class="tagline">Drop a recording to read every <b>server-zone IPC packet</b> it contains — opcode, size,
     timing and a raw hex view of the bytes. Built to hunt down the two opcodes the workbench has to hand-enter
     each patch: <b>PartyList</b> and <b>PartyPortraitInfo</b>. Everything runs in your browser; the file never leaves your machine.</p>
 
   <label class="drop" id="drop" for="file">
-    <div class="big">Drop a <b style="color:var(--phosphor)">.dat</b> here, or click to browse.</div>
-    <div class="small">An "A Realm Recorded" duty recording</div>
+    <div class="big">Drop a .dat file here, or click to browse</div>
+    <div class="small">Any duty recording</div>
     <input type="file" id="file" accept=".dat">
   </label>
 
   <!-- header readout -->
   <section class="panel hidden" id="p-header">
-    <div class="head"><h2>Recording Header</h2><span class="meta" id="h-file">—</span></div>
+    <div class="head"><h2>Recording header</h2><span class="meta mono" id="h-file">—</span></div>
     <div class="readout" id="readout"></div>
   </section>
 
   <!-- custom opcode finder -->
   <section class="panel hidden" id="p-finder">
     <div class="head">
-      <h2>Custom Opcode Finder</h2>
+      <h2>Opcode finder</h2>
       <span style="display:flex;align-items:center;gap:12px">
-        <button class="ghost" id="btn-export" title="Download a {name:opcode} table for this build — paste it straight into the workbench dev menu">Export table JSON →</button>
+        <button class="ghost sm" id="btn-export" title="Download a {name:opcode} table for this build — paste it straight into the workbench dev menu">Export table JSON</button>
         <span class="meta" id="finder-meta">—</span>
       </span>
     </div>
@@ -215,7 +126,7 @@
   <!-- opcode census -->
   <section class="panel hidden" id="p-census">
     <div class="head">
-      <h2>Opcode Census</h2>
+      <h2>Opcodes in this file</h2>
       <span class="meta" id="census-meta">—</span>
     </div>
     <div class="toolbar">
@@ -239,15 +150,14 @@
 
   <!-- hex inspector -->
   <section class="panel hidden" id="p-inspect">
-    <div class="head"><h2>Packet Inspector</h2><span class="meta" id="insp-meta">select an opcode</span></div>
+    <div class="head"><h2>Packets</h2><span class="meta" id="insp-meta">select an opcode</span></div>
     <div class="body" id="insp-body">
-      <p class="dim" style="font-family:var(--mono);font-size:12px">Click any opcode in the census above to dump its packets.</p>
+      <p class="dim" style="font-size:13px">Click an opcode in the table above to list its packets.</p>
     </div>
   </section>
 
   <footer>
-    <div><b>replay.workbench</b> · opcode inspector · <a href="index.html" style="color:var(--phosphor);text-decoration:none">replay editor</a></div>
-    <div>read-only · per-patch opcode names from karashiiro/FFXIVOpcodes</div>
+    Opcode Inspector · read-only · opcode names from karashiiro/FFXIVOpcodes · <a href="index.html">Replay Workbench</a>
   </footer>
 </div>
 
@@ -694,16 +604,16 @@ function finderCard(title,desc,cands,isPortrait){
       : `<span class="warn">only ${top.rosterMax}/${rosterIds.length} roster members in a single packet</span>`);
   }
   if(top.namesMax>=2) why.push(`<span class="ok">✓ ${top.namesMax} party names in one packet</span>`);
-  else if(top.namesMax===1) why.push(`<span class="warn">1 name per packet</span> <span style="color:var(--ink-faint)">(${top.names.size} across all ${top.count})</span>`);
+  else if(top.namesMax===1) why.push(`<span class="warn">1 name per packet</span> <span style="color:var(--faint)">(${top.names.size} across all ${top.count})</span>`);
   else if(!isPortrait || !rosterUsable()) why.push(`<span class="warn">no names matched</span>`);
-  why.push(`appears <b style="color:var(--ink-dim)">${top.count}×</b>`);
+  why.push(`appears <b style="color:var(--muted)">${top.count}×</b>`);
   if(named) why.push(named===title?`<span class="ok">✓ matches the loaded table</span>`
     :`<span class="warn">⚠ the loaded table calls this ${esc(named)}</span>`);
   return `<div class="fcard hit"><h3>${title}</h3><div class="desc">${desc}</div>
     <div class="fbig">${top.op}<button class="copybtn" data-copy="${top.op}">copy</button></div>
     <div class="fhex">${hx(top.op)} · modal size ${top.modalLen} B</div>
     <div class="fwhy">${why.join(" &nbsp;·&nbsp; ")}</div>
-    <div style="margin-top:10px"><button class="ghost" data-open="${top.op}">Inspect bytes →</button></div></div>`;
+    <div style="margin-top:10px"><button class="ghost" data-open="${top.op}">Inspect bytes</button></div></div>`;
 }
 
 function renderFinder(){
@@ -719,12 +629,12 @@ function renderFinder(){
   if(lists.length>1) altParts.push(`<div><b>Other roster-bearing opcodes:</b> ${lists.slice(1,6).map(e=>{
     const ev=[]; if(e.rosterMax) ev.push(e.rosterMax+"r"); if(e.namesMax) ev.push(e.namesMax+"n");
     const nm=nameFor(e.op);
-    return `<span class="pick" data-open="${e.op}">${e.op} <span style="color:var(--ink-faint)">(${ev.join("/")}${nm?" · "+esc(nm):""})</span></span>`;
+    return `<span class="pick" data-open="${e.op}">${e.op} <span style="color:var(--faint)">(${ev.join("/")}${nm?" · "+esc(nm):""})</span></span>`;
   }).join(", ")}</div>`);
   const patchT=filePatch?patchTable(filePatch):null;
   if(patchT){
     const t=patchT;
-    altParts.push(`<div style="margin-top:6px;color:var(--ink-faint)">This build's table already records PartyList=<b style="color:var(--ink-dim)">${t.PartyList}</b>, PartyPortraitInfo=<b style="color:var(--ink-dim)">${t.PartyPortraitInfo}</b> — use the finder to verify them on a fresh patch.</div>`);
+    altParts.push(`<div style="margin-top:6px;color:var(--faint)">This build's table already records PartyList=<b style="color:var(--muted)">${t.PartyList}</b>, PartyPortraitInfo=<b style="color:var(--muted)">${t.PartyPortraitInfo}</b> — use the finder to verify them on a fresh patch.</div>`);
   }
   document.getElementById("finder-alt").innerHTML=altParts.join("");
 
@@ -756,10 +666,10 @@ const COLS=[
   // per packet, not the union across packets — the union can't tell a roster
   // packet apart from N single-member packets
   {k:"namesMax",label:"names/pkt",get:e=>e.namesMax,cell:e=>e.namesMax
-    ? `<span style="color:var(--violet)" title="${e.names.size} distinct name${e.names.size>1?"s":""} across all ${e.count} packet${e.count>1?"s":""}">${e.namesMax}</span>`
+    ? `<span style="color:var(--mark)" title="${e.names.size} distinct name${e.names.size>1?"s":""} across all ${e.count} packet${e.count>1?"s":""}">${e.namesMax}</span>`
     : `<span class="dim">—</span>`},
   {k:"rosterMax",label:"roster/pkt",get:e=>e.rosterMax,cell:e=>(e.rosterMax && rosterUsable())
-    ? `<span style="color:var(--violet)">${e.rosterMax}<span class="dim">/${rosterIds.length}</span></span>`
+    ? `<span style="color:var(--mark)">${e.rosterMax}<span class="dim">/${rosterIds.length}</span></span>`
     : `<span class="dim">—</span>`},
   {k:"firstMs",label:"first",get:e=>e.firstMs,cell:e=>`<span class="dim">${fmtClock(e.firstMs)}</span>`},
   {k:"lastMs",label:"last",get:e=>e.lastMs,cell:e=>`<span class="dim">${fmtClock(e.lastMs)}</span>`},
@@ -812,7 +722,7 @@ function renderInspector(){
   const segIdx=e.idxs[selectedPktIdx], s=segs[segIdx];
   const body=document.getElementById("insp-body");
   const nameList=e.names.size
-    ? `<span style="color:var(--violet)">${[...e.names].map(esc).join(", ")}</span> <span class="dim">(max ${e.namesMax} in one packet)</span>`
+    ? `<span style="color:var(--mark)">${[...e.names].map(esc).join(", ")}</span> <span class="dim">(max ${e.namesMax} in one packet)</span>`
     : '<span class="dim">none</span>';
   const rosterLine=rosterUsable()
     ? `<span>roster ids: <b>${e.rosterMax}/${rosterIds.length}</b> <span class="dim">in one packet</span></span>` : "";
@@ -898,7 +808,7 @@ function load(name,buffer){
     renderHeader(); renderFinder(); renderCensusHead(); renderCensusBody();
     ["p-header","p-finder","p-census","p-inspect"].forEach(id=>document.getElementById(id).classList.remove("hidden"));
     document.getElementById("insp-meta").textContent="select an opcode";
-    document.getElementById("insp-body").innerHTML=`<p class="dim" style="font-family:var(--mono);font-size:12px">Click any opcode in the census above to dump its packets.</p>`;
+    document.getElementById("insp-body").innerHTML=`<p class="dim" style="font-size:13px">Click an opcode in the table above to list its packets.</p>`;
     document.getElementById("drop").classList.add("compact");
     toast(`Read ${segs.length.toLocaleString()} packets · ${census.length} distinct opcodes · ${partyNames.length} party names.`);
   }catch(err){ toast(err.message,true); console.error(err); }

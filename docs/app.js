@@ -1,6 +1,6 @@
 "use strict";
-/* The inspector runs as a self-contained module (window.Inspector) so it can
-   share a page with the playback module without their globals colliding. */
+/* The editor runs as a self-contained module (window.Inspector); shell.js owns
+   the drop zone and hands it each file. */
 (function(){
 /* =====================================================================
    FFXIVReplay .dat — format constants (from the FFXIVReplay struct)
@@ -67,6 +67,8 @@ const JOB_ABBR = {0:"—",1:"GLA",2:"PGL",3:"MRD",4:"LNC",5:"ARC",6:"CNJ",7:"THM
   19:"PLD",20:"MNK",21:"WAR",22:"DRG",23:"BRD",24:"WHM",25:"BLM",26:"ACN",27:"SMN",28:"SCH",
   29:"ROG",30:"NIN",31:"MCH",32:"DRK",33:"AST",34:"SAM",35:"RDM",36:"BLU",37:"GNB",38:"DNC",
   39:"RPR",40:"SGE",41:"VPR",42:"PCT",43:"BST"};
+const TANK_JOBS = new Set([1,3,19,21,32,37]), HEALER_JOBS = new Set([6,24,28,33,40]);
+function jobRole(j){ return !j ? "" : TANK_JOBS.has(j) ? "tank" : HEALER_JOBS.has(j) ? "healer" : "dps"; }
 
 /* ---- app state ---- */
 let raw = null;          // Uint8Array of the loaded file
@@ -418,14 +420,14 @@ function renderHeader(){
   const playerIndex=raw[OFF_PLAYERINDEX];
   const cells=[
     ["format version", u16(OFF_VERSION), ""],
-    ["os", u16(OFF_OSTYPE)===3?"Windows":u16(OFF_OSTYPE)===5?"Mac":u16(OFF_OSTYPE), ""],
+    ["OS", u16(OFF_OSTYPE)===3?"Windows":u16(OFF_OSTYPE)===5?"Mac":u16(OFF_OSTYPE), ""],
     ["game build", i32(OFF_BUILD)===LATEST_GAME_BUILD ? i32(OFF_BUILD) : `${i32(OFF_BUILD)} (outdated)`, i32(OFF_BUILD)===LATEST_GAME_BUILD ? "" : "amber"],
     ["recorded", new Date(ts*1000).toISOString().replace("T"," ").replace(/\..+/,"")+" UTC", "cyan"],
-    ["content id", u16(OFF_CONTENTID), ""],
+    ["content ID", u16(OFF_CONTENTID), ""],
     ["total length", fmtClock(u32(OFF_TOTAL_MS)), "cyan"],
     ["info flags", flags.join(", ")||"none", ""],
     ["recorder", `player ${playerIndex+1}`, "amber"],
-    ["jobs", jobs.map(j=>JOB_ABBR[j]||j).join(" "), ""],
+    ["jobs", jobs.map(j=>`<span class="role-${jobRole(j)}">${JOB_ABBR[j]||j}</span>`).join(" "), ""],
     ["local CID", "0x"+localCID.toString(16), ""],
     ["replay length", fmtBytes(i32(OFF_REPLAY_LEN)), ""],
     ["segments", segs.length.toLocaleString(), ""],
@@ -449,7 +451,7 @@ function renderTimeline(){
     const seg=document.createElement("div");
     seg.className="tl-seg"+(idx===selectedPull?" sel":"");
     seg.style.left=left+"%"; seg.style.width=width+"%";
-    seg.style.background = idx===selectedPull?"var(--phosphor)":"var(--phosphor-deep)";
+    seg.style.setProperty("--c", `var(--cat-${idx%6})`);
     seg.title=`Pull ${p.n} — ${fmtClock(startMs)}`;
     seg.onclick=()=>selectPull(idx);
     track.appendChild(seg);
@@ -479,12 +481,13 @@ function renderPullTable(){
   pulls.forEach((p,idx)=>{
     const tr=document.createElement("tr");
     if(idx===selectedPull) tr.className="sel";
-    const cd = p.countdown ? `<span class="cd" title="engage (countdown chapter) ${fmtClock(p.countdown.ms-p.chapter.ms)} into this pull">⏱</span>` : "";
+    tr.style.setProperty("--c", `var(--cat-${idx%6})`);
+    const cd = p.countdown ? `<span class="cd" title="engage (countdown chapter) ${fmtClock(p.countdown.ms-p.chapter.ms)} into this pull">countdown</span>` : "";
     tr.innerHTML=`<td class="num">${p.n}</td>
       <td>${CHAPTER_TYPE_NAMES[p.chapter.type]||p.chapter.type}${cd}</td>
       <td>${fmtClock(p.chapter.ms)}</td>
       <td class="dim">${fmtClock(p.lengthMs)}</td>
-      <td class="num">${p.combatMs?fmtClock(p.combatMs):'<span class="dim">—</span>'}</td>
+      <td class="combat">${p.combatMs?fmtClock(p.combatMs):'<span class="dim">—</span>'}</td>
       <td class="dim">${p.batchCount} spawns</td>`;
     tr.onclick=()=>selectPull(idx);
     tb.appendChild(tr);
@@ -500,14 +503,13 @@ function renderPlayers(){
     div.className="pl"+(isRec?" rec":"");
     div.innerHTML=`<span class="idx">${idx+1}</span>
       <input type="text" value="${escapeHtml(p.name)}" maxlength="31" data-idx="${idx}">
-      ${isRec?'<span class="reclabel">REC</span>':''}`;
+      ${isRec?'<span class="reclabel">recorder</span>':''}`;
     wrap.appendChild(div);
   });
   document.getElementById("pl-count").textContent=`${players.length} found`;
   wrap.querySelectorAll("input").forEach(inp=>{
     inp.addEventListener("input",e=>{
       players[+e.target.dataset.idx].newName=e.target.value;
-      emitNames();
     });
   });
 }
@@ -520,7 +522,7 @@ function selectPull(idx){
   selectedPull=idx;
   renderTimeline(); renderPullTable();
   const p=pulls[idx];
-  document.getElementById("pull-sel").textContent=`pull ${p.n} · ${CHAPTER_TYPE_NAMES[p.chapter.type]} · ${fmtClock(p.chapter.ms)}`;
+  document.getElementById("pull-sel").textContent=`Pull ${p.n} · ${CHAPTER_TYPE_NAMES[p.chapter.type]} · ${fmtClock(p.chapter.ms)}`;
   document.getElementById("btn-split").disabled=false;
   document.getElementById("export-hint").textContent=`Pull ${p.n} ready to export (opens at ${fmtClock(p.chapter.ms)}, ${p.batchCount} actors respawned).`;
 }
@@ -707,13 +709,6 @@ async function download(bytes,name){
 /* =====================================================================
    Wire up
    ===================================================================== */
-// Broadcast the current name map so the playback module can relabel dots live.
-function emitNames(){
-  const map={};
-  for(const p of players){ map[p.name] = (p.newName!==undefined ? p.newName : p.name); }
-  document.dispatchEvent(new CustomEvent("rw-names",{detail:map}));
-}
-
 /* Patch controls: which patch the file was recorded on, and whether it can be
    transposed to the latest. The patch is read out of the file's own opcodes
    (detectPatch), with the build number as a fallback and the picker as the last
@@ -817,7 +812,6 @@ function loadBytes(name, buffer){
       document.getElementById("pull-sel").textContent="none selected";
       document.getElementById("export-hint").textContent="Select a pull from the timeline or table to enable export.";
       toast(`Loaded ${pulls.length} pulls, ${players.length} players.`);
-      emitNames(); // sync playback to the freshly loaded (unedited) names
     }catch(err){ toast(err.message,true); }
   }
 }
@@ -1477,7 +1471,6 @@ document.getElementById("btn-anon").addEventListener("click",()=>{
   document.querySelectorAll("#players input").forEach(inp=>{
     inp.value=players[+inp.dataset.idx].newName;
   });
-  emitNames();
   toast(`Anonymized ${players.length} names — export to save.`);
 });
 
